@@ -113,15 +113,15 @@ Each profile in the sidebar shows its name, notes preview, and usage count — a
 
 ### Install a released VSIX
 
-1. Download `claude-switch-<version>.vsix` from the latest [GitHub Release](https://github.com/canichols2-pnnl/pnnl-claude-switch-poc/releases/latest)
+1. Download `pnnl-claude-switch-<version>.vsix` from the latest [GitHub Release](https://github.com/canichols2-pnnl/pnnl-claude-switch-poc/releases/latest)
 2. In VS Code / Cursor open Extensions (`Ctrl+Shift+X` / `Cmd+Shift+X`) → **…** menu → **Install from VSIX…**
 3. Select the downloaded file and reload the window
 
 Or from the command line:
 
 ```bash
-code --install-extension claude-switch-1.2.0.vsix     # VS Code
-cursor --install-extension claude-switch-1.2.0.vsix   # Cursor
+code --install-extension pnnl-claude-switch-1.3.0.vsix     # VS Code
+cursor --install-extension pnnl-claude-switch-1.3.0.vsix   # Cursor
 ```
 
 ### Build and install from source
@@ -132,8 +132,8 @@ Prerequisites: **Node.js 20+** and **npm** (the only dependency is the packaging
 git clone https://github.com/canichols2-pnnl/pnnl-claude-switch-poc.git
 cd pnnl-claude-switch-poc
 npm ci                 # installs @vscode/vsce from package-lock.json
-npm run package        # → claude-switch-<version>.vsix in the repo root
-code --install-extension claude-switch-1.2.0.vsix --force
+npm run package        # → pnnl-claude-switch-<version>.vsix in the repo root
+code --install-extension pnnl-claude-switch-1.3.0.vsix --force
 ```
 
 `--force` replaces an already-installed version. Reload the VS Code window afterwards (**Developer: Reload Window**). The `.vsix` file is git-ignored.

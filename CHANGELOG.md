@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] — 2026-11-02
+
+### Changed
+- **Renamed package to `pnnl-claude-switch`** — the VSIX is now `pnnl-claude-switch-<version>.vsix` and the extension ID is `claude-switch.pnnl-claude-switch`. Settings (`claudeSwitch.*`) and commands are unchanged
+
+### Upgrading from 1.2.0 or earlier
+VS Code treats the new ID as a different extension, so saved profiles (and their tokens) don't carry over automatically:
+1. In the old version, run **Export All Profiles** (sidebar `⋯`) — the export includes tokens, so keep the file private
+2. Uninstall the old **Claude API Switch**, install `pnnl-claude-switch-1.3.0.vsix`, reload
+3. Run **Import Profiles from JSON** and select the exported file, then delete it
+
 ## [1.2.0] — 2026-11-02
 
 ### Added

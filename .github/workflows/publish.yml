@@ -43,7 +43,7 @@ jobs:
         run: node --check extension.js
 
       - name: Package VSIX
-        run: npx vsce package --out "claude-switch-${{ steps.version.outputs.version }}.vsix"
+        run: npx vsce package --out "pnnl-claude-switch-${{ steps.version.outputs.version }}.vsix"
 
       - name: Extract release notes from CHANGELOG
         if: github.ref_type == 'tag'
@@ -63,8 +63,8 @@ jobs:
       - name: Upload VSIX as workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: claude-switch-${{ steps.version.outputs.version }}
-          path: claude-switch-${{ steps.version.outputs.version }}.vsix
+          name: pnnl-claude-switch-${{ steps.version.outputs.version }}
+          path: pnnl-claude-switch-${{ steps.version.outputs.version }}.vsix
 
       - name: Create GitHub Release
         if: github.ref_type == 'tag'
@@ -74,13 +74,13 @@ jobs:
           PRERELEASE=""
           case "$GITHUB_REF_NAME" in *-*) PRERELEASE="--prerelease" ;; esac
           gh release create "$GITHUB_REF_NAME" \
-            "claude-switch-${{ steps.version.outputs.version }}.vsix" \
+            "pnnl-claude-switch-${{ steps.version.outputs.version }}.vsix" \
             --title "Claude API Switch $GITHUB_REF_NAME" \
             --notes-file release-notes.md \
             $PRERELEASE
 
       # - name: Publish to VS Code Marketplace
-      #   run: npx vsce publish --packagePath "claude-switch-${{ steps.version.outputs.version }}.vsix" --pat ${{ secrets.VSCE_PAT }}
+      #   run: npx vsce publish --packagePath "pnnl-claude-switch-${{ steps.version.outputs.version }}.vsix" --pat ${{ secrets.VSCE_PAT }}
 
       # - name: Publish to Open VSX Registry
-      #   run: npx ovsx publish "claude-switch-${{ steps.version.outputs.version }}.vsix" --pat ${{ secrets.OVSX_PAT }}
+      #   run: npx ovsx publish "pnnl-claude-switch-${{ steps.version.outputs.version }}.vsix" --pat ${{ secrets.OVSX_PAT }}
