@@ -12,16 +12,29 @@ const path = require('path');
 const os = require('os');
 const https = require('https');
 const http = require('http');
+const crypto = require('crypto');
 
 // ═══════════════════════════════════════════════
 //  CONSTANTS
 // ═══════════════════════════════════════════════
 
 const STORAGE_KEY_PROFILES = 'claudeSwitch.profiles';
-const STORAGE_KEY_ACTIVE_ID = 'claudeSwitch.appliedProfileId';
+const STORAGE_KEY_LEGACY_ACTIVE_ID = 'claudeSwitch.appliedProfileId'; // no longer used — active profile is detected
 const STORAGE_KEY_USAGE    = 'claudeSwitch.usageStats';
+const STORAGE_KEY_SECRET_KEYS = 'claudeSwitch.secretKeys';   // globalState: ids of values held in SecretStorage
+const STORAGE_KEY_OWNED_ENV   = 'claudeSwitch.ownedEnvKeys'; // workspaceState: env keys we wrote, per folder
 const CONFIG_NAMESPACE = 'claudeCode';
 const CONFIG_KEY = 'environmentVariables';
+
+const EXT_NAMESPACE = 'claudeSwitch';
+const SETTING_STORAGE_TARGET = 'storageTarget';               // 'user' | 'workspace'
+const SETTING_REFRESH_SECONDS = 'statusRefreshIntervalSeconds';
+const LOCAL_SETTINGS_DIR  = '.claude';
+const LOCAL_SETTINGS_FILE = 'settings.local.json';
+const GIT_EXCLUDE_PATTERN = `**/${LOCAL_SETTINGS_DIR}/${LOCAL_SETTINGS_FILE}`;
+
+/** Variable names whose values are kept in SecretStorage and masked in the UI */
+const SECRET_NAME_RE = /TOKEN|KEY|SECRET|PASSWORD/i;
 
 const LOG_PREFIX = '[Claude API Switch]';
 
@@ -131,7 +144,81 @@ function getEditorLabel() {
 //  SETTINGS READ / WRITE
 // ═══════════════════════════════════════════════
 
-function readCurrentEnvVars() {
+// ── Storage target: user settings.json vs. per-workspace .claude/settings.local.json ──
+
+function getStorageTarget() {
+  const value = vscode.workspace.getConfiguration(EXT_NAMESPACE).get(SETTING_STORAGE_TARGET);
+  return value === 'workspace' ? 'workspace' : 'user';
+}
+
+/** Workspace folder the current window is "about": the active editor's folder, else the first one. */
+function getContextFolder() {
+  const folders = vscode.workspace.workspaceFolders || [];
+  if (folders.length === 0) return null;
+  const doc = vscode.window.activeTextEditor?.document;
+  if (doc) {
+    const f = vscode.workspace.getWorkspaceFolder(doc.uri);
+    if (f) return f;
+  }
+  return folders[0];
+}
+
+/** Folder to apply a profile to — asks only in multi-root workspaces. */
+async function pickTargetFolder() {
+  const folders = vscode.workspace.workspaceFolders || [];
+  if (folders.length <= 1) return folders[0] || null;
+  return vscode.window.showWorkspaceFolderPick({ placeHolder: 'Apply profile to which workspace folder?' });
+}
+
+function describeTarget(folder) {
+  if (getStorageTarget() === 'workspace') {
+    return folder ? `${LOCAL_SETTINGS_DIR}/${LOCAL_SETTINGS_FILE} in "${folder.name}"` : 'workspace (no folder open)';
+  }
+  return `${getEditorLabel()} user settings`;
+}
+
+/** Reads env vars from whichever storage target is selected. */
+async function readCurrentEnvVars(folder) {
+  if (getStorageTarget() === 'workspace') {
+    folder = folder || getContextFolder();
+    return folder ? readLocalEnvVars(folder) : [];
+  }
+  return readUserEnvVars();
+}
+
+/** Writes env vars to whichever storage target is selected. */
+async function writeEnvVars(context, variables, folder) {
+  if (getStorageTarget() === 'workspace') {
+    if (!folder) {
+      return { success: false, error: 'No workspace folder is open. Open a folder, or set "claudeSwitch.storageTarget" to "user".' };
+    }
+    return writeEnvVarsToLocal(context, folder, variables);
+  }
+  return writeEnvVarsToUser(variables);
+}
+
+/** Applies a profile to the selected target (prompting for a folder if needed). */
+async function applyProfileVariables(context, profile) {
+  let folder = null;
+  if (getStorageTarget() === 'workspace') {
+    folder = await pickTargetFolder();
+    if (!folder && (vscode.workspace.workspaceFolders || []).length > 1) return null; // picker dismissed
+  }
+  const result = await writeEnvVars(context, profile.variables, folder);
+  return { ...result, folder, targetLabel: describeTarget(folder) };
+}
+
+function formatApplySuccess(profileName, result) {
+  const parts = [`✅ "${profileName}" applied to ${result.targetLabel}.`];
+  if (result.cleanup?.removed) parts.push('Removed claudeCode.environmentVariables from user settings.');
+  if (result.gitExcluded === false) parts.push(`⚠ Could not add ${LOCAL_SETTINGS_FILE} to .git/info/exclude — make sure it is not committed.`);
+  parts.push('Restart any running Claude sessions to pick it up.');
+  return parts.join(' ');
+}
+
+// ── User settings (claudeCode.environmentVariables) ──
+
+function readUserEnvVars() {
   try {
     const config = vscode.workspace.getConfiguration(CONFIG_NAMESPACE);
     const vars = config.get(CONFIG_KEY);
@@ -146,7 +233,202 @@ function readCurrentEnvVars() {
   } catch (_) { return []; }
 }
 
-async function writeEnvVarsToSettings(variables) {
+/** Removes claudeCode.environmentVariables from user settings entirely. */
+async function removeUserEnvVars() {
+  const settingsPath = detectSettingsJsonPath();
+  const key = `${CONFIG_NAMESPACE}.${CONFIG_KEY}`;
+  let present = readUserEnvVars().length > 0;
+  try {
+    const raw = fs.existsSync(settingsPath) ? fs.readFileSync(settingsPath, 'utf-8') : '';
+    present = present || raw.includes(`"${key}"`);
+  } catch (_) { /* best effort */ }
+  if (!present) return { removed: false };
+
+  try {
+    const config = vscode.workspace.getConfiguration(CONFIG_NAMESPACE);
+    await config.update(CONFIG_KEY, undefined, vscode.ConfigurationTarget.Global);
+    return { removed: true, method: 'config-api' };
+  } catch (_) { /* fall through — setting may not be registered (Claude Code not installed) */ }
+  try {
+    const removed = removeKeyFromSettingsFile(settingsPath, key);
+    return { removed, method: 'file-write' };
+  } catch (e) {
+    logError('Failed to remove user env vars', e);
+    return { removed: false, error: e.message };
+  }
+}
+
+/** Index of the "]" closing the array that opens at `start` (string-aware), or -1. */
+function findArrayEnd(raw, start) {
+  let depth = 0, inString = false;
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (ch === '\\') i++;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '[') depth++;
+    else if (ch === ']') { depth--; if (depth === 0) return i; }
+  }
+  return -1;
+}
+
+function removeKeyFromSettingsFile(settingsPath, key) {
+  if (!fs.existsSync(settingsPath)) return false;
+  const raw = fs.readFileSync(settingsPath, 'utf-8');
+  const keyIndex = raw.indexOf(`"${key}"`);
+  if (keyIndex === -1) return false;
+  const bracketStart = raw.indexOf('[', raw.indexOf(':', keyIndex));
+  const bracketEnd = bracketStart === -1 ? -1 : findArrayEnd(raw, bracketStart);
+  if (bracketEnd === -1) return false;
+
+  let start = keyIndex, end = bracketEnd + 1;
+  let after = end;
+  while (after < raw.length && /\s/.test(raw[after])) after++;
+  if (raw[after] === ',') {
+    end = after + 1;                         // drop our trailing comma…
+    while (end < raw.length && raw[end] !== '\n' && /\s/.test(raw[end])) end++;
+    if (raw[end] === '\r') end++;
+    if (raw[end] === '\n') end++;            // …and the rest of its line
+  } else {
+    let before = start - 1;
+    while (before >= 0 && /\s/.test(raw[before])) before--;
+    if (raw[before] === ',') start = before; // last entry — drop the preceding comma
+  }
+  while (start > 0 && raw[start - 1] !== '\n' && /\s/.test(raw[start - 1])) start--; // leading indent
+  fs.writeFileSync(settingsPath, raw.slice(0, start) + raw.slice(end), 'utf-8');
+  return true;
+}
+
+// ── Workspace settings (<folder>/.claude/settings.local.json → "env") ──
+
+function localSettingsUri(folder) {
+  return vscode.Uri.joinPath(folder.uri, LOCAL_SETTINGS_DIR, LOCAL_SETTINGS_FILE);
+}
+
+function isFileNotFound(err) {
+  return err?.code === 'FileNotFound' || err?.code === 'ENOENT' || err?.code === 'EntryNotFound';
+}
+
+async function readLocalSettings(folder) {
+  let raw;
+  try {
+    raw = Buffer.from(await vscode.workspace.fs.readFile(localSettingsUri(folder))).toString('utf-8');
+  } catch (e) {
+    if (isFileNotFound(e)) return {};
+    throw e;
+  }
+  if (!raw.trim()) return {};
+  const parsed = parseJsonc(raw); // throws on invalid JSON — never overwrite a file we can't read
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+}
+
+async function readLocalEnvVars(folder) {
+  const settings = await readLocalSettings(folder);
+  const env = settings.env && typeof settings.env === 'object' ? settings.env : {};
+  return Object.entries(env).map(([name, value]) => ({ name, value: value == null ? '' : String(value) }));
+}
+
+function ownedEnvStateKey(folder) {
+  return `${STORAGE_KEY_OWNED_ENV}:${folder.uri.toString()}`;
+}
+
+async function writeEnvVarsToLocal(context, folder, variables) {
+  const uri = localSettingsUri(folder);
+  try {
+    const settings = await readLocalSettings(folder);
+    const env = settings.env && typeof settings.env === 'object' ? { ...settings.env } : {};
+
+    // Remove whatever a previous profile put here, but leave unrelated keys alone.
+    const stale = new Set([
+      ...(context.workspaceState.get(ownedEnvStateKey(folder)) || []),
+      ...STANDARD_VAR_NAMES,
+      ...loadProfiles(context).flatMap(p => p.variables.map(v => v.name)),
+    ]);
+    for (const k of stale) delete env[k];
+
+    const written = [];
+    for (const v of variables) {
+      if (v.value === '' || v.value == null) continue; // an empty var would override Claude's defaults
+      env[v.name] = v.value;
+      written.push(v.name);
+    }
+    if (Object.keys(env).length) settings.env = env;
+    else delete settings.env;
+
+    await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(folder.uri, LOCAL_SETTINGS_DIR));
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(JSON.stringify(settings, null, 2) + '\n', 'utf-8'));
+    await context.workspaceState.update(ownedEnvStateKey(folder), written);
+
+    const gitExcluded = await ensureGitExcluded(folder);
+    const cleanup = await removeUserEnvVars();
+    return { success: true, method: 'local-file', path: uri.fsPath, gitExcluded, cleanup };
+  } catch (e) {
+    return { success: false, method: 'local-file', error: e.message };
+  }
+}
+
+/** Resolves a path read from a git file, relative to `base`, onto the same URI scheme. */
+function resolveGitPath(base, p) {
+  p = p.trim();
+  if (!path.isAbsolute(p) && !/^[a-zA-Z]:[\\/]/.test(p)) return vscode.Uri.joinPath(base, p);
+  return base.scheme === 'file' ? vscode.Uri.file(p) : base.with({ path: p.replace(/\\/g, '/') });
+}
+
+async function readText(uri) {
+  return Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf-8');
+}
+
+/**
+ * Makes sure .claude/settings.local.json is ignored by adding it to the repo's
+ * .git/info/exclude (local-only, so no tracked file is touched). Walks up from the
+ * folder to find the repo and follows worktree "gitdir:" / "commondir" pointers.
+ * Returns true if excluded (or no repo found), false if it could not be done.
+ */
+async function ensureGitExcluded(folder) {
+  try {
+    let dir = folder.uri, gitDir = null;
+    for (let i = 0; i < 20 && !gitDir; i++) {
+      const dotGit = vscode.Uri.joinPath(dir, '.git');
+      try {
+        const stat = await vscode.workspace.fs.stat(dotGit);
+        if (stat.type & vscode.FileType.Directory) {
+          gitDir = dotGit;
+        } else {
+          const m = (await readText(dotGit)).match(/^gitdir:\s*(.+)$/m);
+          if (m) gitDir = resolveGitPath(dir, m[1]);
+        }
+      } catch (_) { /* not here — keep walking up */ }
+      if (gitDir) break;
+      const parent = vscode.Uri.joinPath(dir, '..');
+      if (parent.path === dir.path) break;
+      dir = parent;
+    }
+    if (!gitDir) return true; // not a git repo — nothing can be committed
+
+    try { gitDir = resolveGitPath(gitDir, (await readText(vscode.Uri.joinPath(gitDir, 'commondir'))).trim()); }
+    catch (_) { /* not a linked worktree */ }
+
+    const infoDir = vscode.Uri.joinPath(gitDir, 'info');
+    const excludeUri = vscode.Uri.joinPath(infoDir, 'exclude');
+    let content = '';
+    try { content = await readText(excludeUri); } catch (e) { if (!isFileNotFound(e)) throw e; }
+    if (content.split(/\r?\n/).some(l => l.trim() === GIT_EXCLUDE_PATTERN)) return true;
+
+    const prefix = content && !content.endsWith('\n') ? '\n' : '';
+    await vscode.workspace.fs.createDirectory(infoDir);
+    await vscode.workspace.fs.writeFile(excludeUri,
+      Buffer.from(`${content}${prefix}# Claude API Switch — per-workspace API keys\n${GIT_EXCLUDE_PATTERN}\n`, 'utf-8'));
+    return true;
+  } catch (e) {
+    logError('Failed to update .git/info/exclude', e);
+    return false;
+  }
+}
+
+async function writeEnvVarsToUser(variables) {
   try {
     const config = vscode.workspace.getConfiguration(CONFIG_NAMESPACE);
     await config.update(CONFIG_KEY, variables, vscode.ConfigurationTarget.Global);
@@ -173,11 +455,8 @@ async function writeEnvVarsToSettings(variables) {
         bracketStart = colonIndex + 1;
         while (bracketStart < raw.length && raw[bracketStart] !== '[') bracketStart++;
       }
-      let depth = 0, bracketEnd = bracketStart;
-      for (let i = bracketStart; i < raw.length; i++) {
-        if (raw[i] === '[') depth++;
-        else if (raw[i] === ']') { depth--; if (depth === 0) { bracketEnd = i; break; } }
-      }
+      const found = findArrayEnd(raw, bracketStart);
+      const bracketEnd = found === -1 ? bracketStart : found;
       updated = raw.slice(0, bracketStart) + indented + raw.slice(bracketEnd + 1);
     } else {
       const trimmed = raw.trimEnd();
@@ -214,17 +493,186 @@ function parseJsonc(raw) {
 //  PROFILE STORAGE
 // ═══════════════════════════════════════════════
 
+// Secret-looking variable values (tokens, keys) live in SecretStorage, not globalState.
+// globalState keeps `{ name, value: '', secret: true }`; this cache fills the value back in.
+const _secretCache = new Map();
+
+function isSecretVar(name) { return SECRET_NAME_RE.test(name || ''); }
+function secretId(profileId, varName) { return `${EXT_NAMESPACE}.secret:${profileId}:${varName}`; }
+
+function maskValue(name, value) {
+  if (!value) return '';
+  if (!isSecretVar(name)) return value;
+  return value.length <= 8 ? '••••' : `${value.slice(0, 6)}…${value.slice(-2)}`;
+}
+
+/** Re-reads every stored secret into the cache (on activation and window focus). */
+async function loadSecretCache(context) {
+  const keys = context.globalState.get(STORAGE_KEY_SECRET_KEYS) || [];
+  const fresh = new Map();
+  for (const k of keys) {
+    try {
+      const v = await context.secrets.get(k);
+      if (v !== undefined) fresh.set(k, v);
+    } catch (e) { logError(`Failed to read secret ${k}`, e); }
+  }
+  _secretCache.clear();
+  for (const [k, v] of fresh) _secretCache.set(k, v);
+}
+
+/** Returns copies of the stored profiles with secret values filled in. */
 function loadProfiles(context) {
-  return context.globalState.get(STORAGE_KEY_PROFILES) || [];
+  const stored = context.globalState.get(STORAGE_KEY_PROFILES) || [];
+  return stored.map(p => ({
+    ...p,
+    variables: (p.variables || []).map(v => ({
+      name: v.name,
+      value: v.secret ? (_secretCache.get(secretId(p.id, v.name)) ?? '') : (v.value || ''),
+    })),
+  }));
 }
-function saveProfiles(context, profiles) {
-  return context.globalState.update(STORAGE_KEY_PROFILES, profiles);
+
+async function saveProfiles(context, profiles) {
+  const prevKeys = new Set(context.globalState.get(STORAGE_KEY_SECRET_KEYS) || []);
+  const nextKeys = new Set();
+  const stored = profiles.map(p => ({ ...p, variables: [] }));
+
+  for (let i = 0; i < profiles.length; i++) {
+    const p = profiles[i];
+    for (const v of p.variables) {
+      const id = secretId(p.id, v.name);
+      if (isSecretVar(v.name)) {
+        // Known secret we never loaded (e.g. added from another window before our cache
+        // refreshed) — keep it rather than treating the blank as "cleared".
+        const unknownExisting = !v.value && prevKeys.has(id) && !_secretCache.has(id);
+        if (v.value || unknownExisting) {
+          try {
+            if (v.value && _secretCache.get(id) !== v.value) {
+              await context.secrets.store(id, v.value);
+              _secretCache.set(id, v.value);
+            }
+            nextKeys.add(id);
+            stored[i].variables.push({ name: v.name, value: '', secret: true });
+            continue;
+          } catch (e) {
+            logError(`SecretStorage unavailable — keeping ${v.name} in plain storage`, e);
+          }
+        }
+      }
+      stored[i].variables.push({ name: v.name, value: v.value || '' });
+    }
+  }
+
+  await context.globalState.update(STORAGE_KEY_PROFILES, stored);
+  await context.globalState.update(STORAGE_KEY_SECRET_KEYS, [...nextKeys]);
+  for (const k of prevKeys) {
+    if (nextKeys.has(k)) continue;
+    _secretCache.delete(k);
+    try { await context.secrets.delete(k); } catch (_) { /* best effort */ }
+  }
 }
-function getActiveProfileId(context) {
-  return context.globalState.get(STORAGE_KEY_ACTIVE_ID) || null;
+
+// ═══════════════════════════════════════════════
+//  ACTIVE PROFILE DETECTION
+//  The active profile is never stored — it is derived by comparing what is
+//  actually in the target settings file against the saved profiles, so edits
+//  from other windows or by hand are always reflected.
+// ═══════════════════════════════════════════════
+
+/** name → value map, ignoring empty values (they are never written to the local file). */
+function normalizeVars(vars) {
+  const m = new Map();
+  for (const v of vars || []) {
+    if (v?.name && v.value != null && v.value !== '') m.set(v.name, String(v.value));
+  }
+  return m;
 }
-function setActiveProfileId(context, id) {
-  return context.globalState.update(STORAGE_KEY_ACTIVE_ID, id);
+
+function diffVars(want, have) {
+  const diffs = [];
+  for (const [k, v] of want) if (have.get(k) !== v) diffs.push(k);
+  for (const k of have.keys()) if (!want.has(k)) diffs.push(k);
+  return diffs;
+}
+
+/**
+ * @returns {Promise<{state:'match'|'modified'|'none'|'no-folder'|'error', target:string,
+ *   folder:any, profile?:any, closest?:{profile:any,diffs:string[]}, error?:string,
+ *   userVarsPresent?:boolean, checkedAt:Date}>}
+ */
+async function detectActiveProfile(context) {
+  const target = getStorageTarget();
+  const folder = target === 'workspace' ? getContextFolder() : null;
+  const base = { target, folder, checkedAt: new Date() };
+  if (target === 'workspace') base.userVarsPresent = readUserEnvVars().length > 0;
+  if (target === 'workspace' && !folder) return { ...base, state: 'no-folder' };
+
+  let current;
+  try { current = normalizeVars(await readCurrentEnvVars(folder)); }
+  catch (e) { return { ...base, state: 'error', error: e.message }; }
+
+  // Only compare keys this extension manages — other env vars in settings.local.json are ignored.
+  const profiles = loadProfiles(context);
+  const managed = new Set(STANDARD_VAR_NAMES);
+  profiles.forEach(p => p.variables.forEach(v => managed.add(v.name)));
+  const relevant = new Map([...current].filter(([k]) => managed.has(k)));
+  if (relevant.size === 0) return { ...base, state: 'none' };
+
+  let closest = null;
+  for (const p of profiles) {
+    const diffs = diffVars(normalizeVars(p.variables), relevant);
+    if (diffs.length === 0) return { ...base, state: 'match', profile: p };
+    if (!closest || diffs.length < closest.diffs.length) closest = { profile: p, diffs };
+  }
+  return { ...base, state: 'modified', closest };
+}
+
+/** Re-checks the active profile on demand and notifies listeners. Checks are serialized. */
+class ActiveProfileMonitor {
+  constructor(context) {
+    this._context = context;
+    this.current = { state: 'none', target: getStorageTarget(), folder: null, checkedAt: null };
+    this._signature = '';
+    this._running = null;
+    this._queued = false;
+    this._onDidCheck = new vscode.EventEmitter();
+    /** fires `(result, changed)` after every check */
+    this.onDidCheck = this._onDidCheck.event;
+  }
+
+  get activeProfileId() {
+    return this.current.state === 'match' ? this.current.profile.id : null;
+  }
+
+  check() {
+    if (this._running) { this._queued = true; return this._running; }
+    this._running = (async () => {
+      try {
+        do {
+          this._queued = false;
+          const result = await detectActiveProfile(this._context);
+          const profiles = loadProfiles(this._context);
+          const signature = JSON.stringify([
+            result.target, result.folder?.uri.toString(), result.state, result.profile?.id,
+            result.closest?.profile.id, result.closest?.diffs, result.userVarsPresent, result.error,
+            profiles.map(p => [p.id, p.name, p.updatedAt]),
+          ]);
+          const changed = signature !== this._signature;
+          this._signature = signature;
+          this.current = result;
+          this._onDidCheck.fire({ result, changed });
+        } while (this._queued);
+      } catch (e) {
+        logError('Active profile check failed', e);
+      } finally {
+        this._running = null;
+      }
+      return this.current;
+    })();
+    return this._running;
+  }
+
+  dispose() { this._onDidCheck.dispose(); }
 }
 
 function makeProfile(name, variables, notes) {
@@ -255,7 +703,7 @@ function recordUsage(context, profileId) {
   }
   stats[profileId].applyCount++;
   stats[profileId].lastApplied = now;
-  context.globalState.update(STORAGE_KEY_USAGE, stats);
+  return context.globalState.update(STORAGE_KEY_USAGE, stats);
 }
 
 function recordTestResult(context, profileId, result) {
@@ -275,7 +723,7 @@ function recordTestResult(context, profileId, result) {
   if (stats[profileId].testResults.length > 20) {
     stats[profileId].testResults = stats[profileId].testResults.slice(-20);
   }
-  context.globalState.update(STORAGE_KEY_USAGE, stats);
+  return context.globalState.update(STORAGE_KEY_USAGE, stats);
 }
 
 function formatUsageSummary(context, profileId) {
@@ -307,10 +755,11 @@ function testApiEndpoint(variables) {
 
   const baseUrl = getVar('ANTHROPIC_BASE_URL');
   const authToken = getVar('ANTHROPIC_AUTH_TOKEN');
+  const apiKey = getVar('ANTHROPIC_API_KEY');
   const model = getVar('ANTHROPIC_MODEL');
 
   if (!baseUrl)  return Promise.resolve({ success: false, error: 'ANTHROPIC_BASE_URL is not set' });
-  if (!authToken) return Promise.resolve({ success: false, error: 'ANTHROPIC_AUTH_TOKEN is not set' });
+  if (!authToken && !apiKey) return Promise.resolve({ success: false, error: 'ANTHROPIC_AUTH_TOKEN (or ANTHROPIC_API_KEY) is not set' });
   if (!model)    return Promise.resolve({ success: false, error: 'ANTHROPIC_MODEL is not set' });
 
   let url;
@@ -337,7 +786,9 @@ function testApiEndpoint(variables) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-api-key': authToken,
+      // Same auth headers Claude Code sends: AUTH_TOKEN as Bearer, API_KEY as x-api-key
+      ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}),
+      ...(apiKey ? { 'x-api-key': apiKey } : {}),
       'anthropic-version': '2023-06-01',
       'Content-Length': Buffer.byteLength(requestBody),
     },
@@ -483,6 +934,8 @@ function getWebviewHtml(profile, isNew, mode = 'form') {
       <td><button class="btn-icon btn-del-row" title="Remove" type="button">✕</button></td>
     </tr>`).join('');
 
+  const nonce = crypto.randomBytes(16).toString('base64');
+
   const templateBtns = Object.keys(TEMPLATES).map(t =>
     `<button class="tmpl-btn" data-template="${escHtml(t)}" type="button">${escHtml(t)}</button>`
   ).join('');
@@ -492,6 +945,7 @@ function getWebviewHtml(profile, isNew, mode = 'form') {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <title>${escHtml(title)}</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -599,7 +1053,7 @@ function getWebviewHtml(profile, isNew, mode = 'form') {
 <div id="status"></div>
 <div id="testResult"></div>
 
-<script>
+<script nonce="${nonce}">
   const vscodeApi = acquireVsCodeApi();
 
   document.querySelectorAll('.tmpl-btn').forEach(btn => {
@@ -774,7 +1228,7 @@ class ProfileItem extends vscode.TreeItem {
       : `${profile.variables.length} vars${usage}`;
     const notesLine = profile.notes ? `\n\n📝 ${profile.notes}` : '';
     this.tooltip = new vscode.MarkdownString(
-      profile.variables.map(v => `- **${v.name}**: \`${v.value || '(empty)'}\``).join('\n\n') +
+      profile.variables.map(v => `- **${v.name}**: \`${maskValue(v.name, v.value) || '(empty)'}\``).join('\n\n') +
       `\n\n---\n*Created: ${profile.createdAt}*${notesLine}\n*ID: ${profile.id}*`
     );
     this.iconPath = new vscode.ThemeIcon(isActive ? 'star-full' : 'server');
@@ -786,8 +1240,9 @@ class ProfileItem extends vscode.TreeItem {
 class VariableItem extends vscode.TreeItem {
   constructor(variable) {
     super(variable.name, vscode.TreeItemCollapsibleState.None);
-    this.description = variable.value || '(empty)';
-    this.tooltip = `${variable.name} = ${variable.value || '(not set)'}`;
+    const shown = maskValue(variable.name, variable.value);
+    this.description = shown || '(empty)';
+    this.tooltip = `${variable.name} = ${shown || '(not set)'}`;
     this.iconPath = new vscode.ThemeIcon('symbol-variable');
     this.contextValue = 'variable';
   }
@@ -804,7 +1259,14 @@ class ApiProfilesProvider {
     this.onDidChangeTreeData = this._onDidChangeTreeData.event;
   }
 
-  refresh() { this._onDidChangeTreeData.fire(); }
+  /** Redraw and re-verify the active profile (the check redraws again if the result changed). */
+  refresh() {
+    this._onDidChangeTreeData.fire();
+    _monitor?.check();
+  }
+
+  /** Redraw only. */
+  redraw() { this._onDidChangeTreeData.fire(); }
 
   getTreeItem(element) { return element; }
 
@@ -817,7 +1279,7 @@ class ApiProfilesProvider {
     }
 
     const profiles = loadProfiles(this._context);
-    const activeId = getActiveProfileId(this._context);
+    const activeId = _monitor?.activeProfileId;
 
     if (profiles.length === 0) {
       const empty = new vscode.TreeItem('No profiles yet', vscode.TreeItemCollapsibleState.None);
@@ -904,6 +1366,8 @@ class ProfileEditorManager {
 // ═══════════════════════════════════════════════
 
 let _editorManager = new ProfileEditorManager();
+/** @type {ActiveProfileMonitor | null} */
+let _monitor = null;
 
 // ── Add Profile ──
 async function cmdAddProfile(context, profilesProvider) {
@@ -948,7 +1412,7 @@ async function cmdAddProfile(context, profilesProvider) {
           variables: result.variables,
           updatedAt: new Date().toISOString(),
         });
-        saveProfiles(context, profiles);
+        await saveProfiles(context, profiles);
         profilesProvider.refresh();
         vscode.window.showInformationMessage(`✅ Profile "${result.name}" created. Apply it to activate.`);
       }
@@ -972,7 +1436,7 @@ async function cmdEditProfile(context, profilesProvider, profileItem) {
     logInfo(`Opening editor for: ${profile.name}`);
     try {
       const result = await _editorManager.open(profile);
-      if (result) saveEditedProfile(context, profilesProvider, profile, result);
+      if (result) await saveEditedProfile(context, profilesProvider, profile, result);
     } catch (err) {
       if (err?.message !== 'Panel closed' && err?.message !== 'Cancelled') {
         logError('Editor open failed', err);
@@ -995,8 +1459,7 @@ async function cmdDeleteProfile(context, profilesProvider, profileItem) {
   );
   if (confirm !== 'Delete') return;
 
-  saveProfiles(context, profiles.filter(p => p.id !== profile.id));
-  if (getActiveProfileId(context) === profile.id) setActiveProfileId(context, null);
+  await saveProfiles(context, profiles.filter(p => p.id !== profile.id));
   profilesProvider.refresh();
   vscode.window.showInformationMessage(`Profile "${profile.name}" deleted.`);
 }
@@ -1008,22 +1471,24 @@ async function cmdApplyProfile(context, profilesProvider, profileItem) {
   const profile = profiles.find(p => p.id === profileItem.id);
   if (!profile) { vscode.window.showErrorMessage('Profile not found.'); return; }
 
-  const editorLabel = getEditorLabel();
+  const detail = getStorageTarget() === 'workspace'
+    ? `This will write ${profile.variables.length} variables to the "env" block of ` +
+      `${LOCAL_SETTINGS_DIR}/${LOCAL_SETTINGS_FILE} in this workspace, and remove ` +
+      `\`claudeCode.environmentVariables\` from user settings.`
+    : `This will update \`claudeCode.environmentVariables\` in ${getEditorLabel()} user settings ` +
+      `with ${profile.variables.length} variables (affects every window).`;
   const confirm = await vscode.window.showInformationMessage(
-    `Apply profile "${profile.name}" to ${editorLabel} settings?\n\n` +
-    `This will update \`claudeCode.environmentVariables\` with ${profile.variables.length} variables.`,
+    `Apply profile "${profile.name}"?\n\n${detail}`,
     { modal: true }, 'Apply'
   );
   if (confirm !== 'Apply') return;
 
-  const result = await writeEnvVarsToSettings(profile.variables);
+  const result = await applyProfileVariables(context, profile);
+  if (!result) return;
   if (result.success) {
-    setActiveProfileId(context, profile.id);
-    recordUsage(context, profile.id);
+    await recordUsage(context, profile.id);
     profilesProvider.refresh();
-    vscode.window.showInformationMessage(
-      `✅ Profile "${profile.name}" applied to ${editorLabel} settings (${result.method}).`
-    );
+    vscode.window.showInformationMessage(formatApplySuccess(profile.name, result));
   } else {
     vscode.window.showErrorMessage(`Failed to write settings: ${result.error || 'Unknown error'}`);
   }
@@ -1049,7 +1514,7 @@ async function cmdDuplicateProfile(context, profilesProvider, profileItem) {
   if (!name) return;
 
   profiles.push(makeProfile(name, source.variables, source.notes));
-  saveProfiles(context, profiles);
+  await saveProfiles(context, profiles);
   profilesProvider.refresh();
   vscode.window.showInformationMessage(`Profile "${name}" duplicated.`);
 }
@@ -1094,7 +1559,7 @@ async function cmdImportProfile(context, profilesProvider) {
       profiles.push(makeProfile(name, item.variables, typeof item.notes === 'string' ? item.notes : ''));
       imported++;
     }
-    saveProfiles(context, profiles);
+    await saveProfiles(context, profiles);
     profilesProvider.refresh();
     vscode.window.showInformationMessage(
       `${imported} profile${imported > 1 ? 's' : ''} imported from ${path.basename(uris[0].fsPath)}.`
@@ -1146,7 +1611,7 @@ async function cmdImportAll(context, profilesProvider) {
       profiles.push(makeProfile(name, item.variables, typeof item.notes === 'string' ? item.notes : ''));
       imported++;
     }
-    saveProfiles(context, profiles);
+    await saveProfiles(context, profiles);
     profilesProvider.refresh();
     vscode.window.showInformationMessage(
       `${imported} profile${imported > 1 ? 's' : ''} imported from ${path.basename(uris[0].fsPath)}.`
@@ -1158,9 +1623,11 @@ async function cmdImportAll(context, profilesProvider) {
 
 // ── Import from Current Settings ──
 async function cmdImportFromCurrent(context, profilesProvider) {
-  const vars = readCurrentEnvVars();
+  let vars;
+  try { vars = await readCurrentEnvVars(); }
+  catch (e) { vscode.window.showErrorMessage(`Could not read ${describeTarget(getContextFolder())}: ${e.message}`); return; }
   if (!Array.isArray(vars) || vars.length === 0) {
-    vscode.window.showErrorMessage('No claudeCode.environmentVariables found in current settings.');
+    vscode.window.showErrorMessage(`No environment variables found in ${describeTarget(getContextFolder())}.`);
     return;
   }
   const name = await vscode.window.showInputBox({
@@ -1176,7 +1643,7 @@ async function cmdImportFromCurrent(context, profilesProvider) {
 
   const profiles = loadProfiles(context);
   profiles.push(makeProfile(name, vars));
-  saveProfiles(context, profiles);
+  await saveProfiles(context, profiles);
   profilesProvider.refresh();
   vscode.window.showInformationMessage(`Profile "${name}" created from current settings (${vars.length} vars).`);
 }
@@ -1188,14 +1655,21 @@ async function cmdImportFromCurrent(context, profilesProvider) {
 // not reliably apply changes.)
 
 // Apply a webview save result to a profile object (shared by form & JSON edits).
-function saveEditedProfile(context, profilesProvider, profile, result) {
-  profile.name = result.name;
-  profile.notes = result.notes || '';
-  profile.variables = result.variables;
-  profile.updatedAt = new Date().toISOString();
-  saveProfiles(context, loadProfiles(context));
+// Reloads the list and replaces the entry by id, so it works even though loadProfiles returns copies.
+async function saveEditedProfile(context, profilesProvider, profile, result) {
+  const profiles = loadProfiles(context);
+  const index = profiles.findIndex(p => p.id === profile.id);
+  if (index === -1) { vscode.window.showErrorMessage('Profile no longer exists.'); return; }
+  profiles[index] = {
+    ...profiles[index],
+    name: result.name,
+    notes: result.notes || '',
+    variables: result.variables,
+    updatedAt: new Date().toISOString(),
+  };
+  await saveProfiles(context, profiles);
   profilesProvider.refresh();
-  vscode.window.showInformationMessage(`✅ Profile "${profile.name}" updated.`);
+  vscode.window.showInformationMessage(`✅ Profile "${result.name}" updated.`);
 }
 
 async function cmdEditAsJson(context, profilesProvider, profileItem) {
@@ -1210,7 +1684,7 @@ async function cmdEditAsJson(context, profilesProvider, profileItem) {
   logInfo(`Opening JSON editor for: ${profile.name}`);
   try {
     const result = await _editorManager.open(profile, { mode: 'json' });
-    if (result) saveEditedProfile(context, profilesProvider, profile, result);
+    if (result) await saveEditedProfile(context, profilesProvider, profile, result);
   } catch (err) {
     if (err?.message !== 'Panel closed' && err?.message !== 'Cancelled') {
       logError('Editor save failed', err);
@@ -1233,7 +1707,7 @@ async function cmdTestProfile(context, profilesProvider, profileItem) {
   try {
     const result = await testApiEndpoint(profile.variables);
     testMsg.dispose();
-    recordTestResult(context, profile.id, result);
+    await recordTestResult(context, profile.id, result);
     profilesProvider.refresh();
 
     const text = formatTestResult(profile.variables, result);
@@ -1264,7 +1738,8 @@ async function cmdQuickSwitch(context, profilesProvider) {
     return;
   }
 
-  const activeId = getActiveProfileId(context);
+  await _monitor?.check(); // verify against the file right before showing the list
+  const activeId = _monitor?.activeProfileId;
   const items = profiles.map(p => ({
     label: p.id === activeId ? `★ ${p.name}` : p.name,
     description: p.id === activeId
@@ -1273,26 +1748,56 @@ async function cmdQuickSwitch(context, profilesProvider) {
     detail: p.notes || formatUsageSummary(context, p.id),
     profile: p,
   }));
+  items.push(
+    { label: '', kind: vscode.QuickPickItemKind.Separator },
+    {
+      label: '$(gear) Change where profiles are saved…',
+      description: `Currently: ${getStorageTarget() === 'workspace' ? 'this workspace' : 'user settings'}`,
+      action: 'storageTarget',
+    },
+  );
 
   const selected = await vscode.window.showQuickPick(items, {
-    placeHolder: 'Select a profile to apply...',
+    placeHolder: `Select a profile to apply to ${describeTarget(getContextFolder())}...`,
     matchOnDescription: true,
     matchOnDetail: true,
   });
   if (!selected) return;
+  if (selected.action === 'storageTarget') {
+    await cmdSelectStorageTarget();
+    return;
+  }
 
-  const editorLabel = getEditorLabel();
-  const result = await writeEnvVarsToSettings(selected.profile.variables);
+  const result = await applyProfileVariables(context, selected.profile);
+  if (!result) return;
   if (result.success) {
-    setActiveProfileId(context, selected.profile.id);
-    recordUsage(context, selected.profile.id);
+    await recordUsage(context, selected.profile.id);
     profilesProvider.refresh();
-    vscode.window.showInformationMessage(
-      `✅ Switched to "${selected.profile.name}" (${editorLabel})`
-    );
+    vscode.window.showInformationMessage(formatApplySuccess(selected.profile.name, result));
   } else {
     vscode.window.showErrorMessage(`Failed to apply: ${result.error || 'Unknown error'}`);
   }
+}
+
+// ── Select Storage Target ──
+async function cmdSelectStorageTarget() {
+  const current = getStorageTarget();
+  const choice = await vscode.window.showQuickPick([
+    {
+      label: 'User settings', value: 'user',
+      description: current === 'user' ? '(current)' : '',
+      detail: 'claudeCode.environmentVariables in user settings.json — one profile shared by every window',
+    },
+    {
+      label: 'This workspace', value: 'workspace',
+      description: current === 'workspace' ? '(current)' : '',
+      detail: `env block of ${LOCAL_SETTINGS_DIR}/${LOCAL_SETTINGS_FILE} per workspace folder — each window can use its own profile`,
+    },
+  ], { placeHolder: 'Where should Claude API Switch save the applied profile?' });
+  if (!choice || choice.value === current) return;
+  // The configuration change listener handles the cleanup / migration.
+  await vscode.workspace.getConfiguration(EXT_NAMESPACE)
+    .update(SETTING_STORAGE_TARGET, choice.value, vscode.ConfigurationTarget.Global);
 }
 
 // ── Clear Usage Stats ──
@@ -1301,33 +1806,39 @@ async function cmdClearUsageStats(context, profilesProvider) {
     'Clear all usage statistics?', { modal: true }, 'Clear'
   );
   if (confirm !== 'Clear') return;
-  context.globalState.update(STORAGE_KEY_USAGE, {});
+  await context.globalState.update(STORAGE_KEY_USAGE, {});
   profilesProvider.refresh();
   vscode.window.showInformationMessage('Usage statistics cleared.');
 }
 
 // ── View Current Config ──
 async function cmdViewCurrentConfig() {
-  const editorLabel = getEditorLabel();
-  const vars = readCurrentEnvVars();
-  const settingsPath = detectSettingsJsonPath();
+  const folder = getContextFolder();
+  const label = describeTarget(folder);
+  const isLocal = getStorageTarget() === 'workspace';
+  const settingsUri = isLocal
+    ? (folder ? localSettingsUri(folder) : null)
+    : vscode.Uri.file(detectSettingsJsonPath());
+
+  let vars;
+  try { vars = await readCurrentEnvVars(folder); }
+  catch (e) { vscode.window.showErrorMessage(`Could not read ${label}: ${e.message}`); return; }
 
   if (!Array.isArray(vars) || vars.length === 0) {
     const result = await vscode.window.showInformationMessage(
-      `No \`claudeCode.environmentVariables\` found in ${editorLabel} settings.`,
-      'Open Settings', 'OK'
+      `No environment variables found in ${label}.`,
+      ...(settingsUri ? ['Open Settings', 'OK'] : ['OK'])
     );
     if (result === 'Open Settings') {
-      if (fs.existsSync(settingsPath)) {
-        vscode.window.showTextDocument(await vscode.workspace.openTextDocument(settingsPath));
-      }
+      try { vscode.window.showTextDocument(await vscode.workspace.openTextDocument(settingsUri)); }
+      catch (_) { /* file does not exist yet */ }
     }
     return;
   }
 
   const content = vars.map(v => `${v.name}=${v.value || ''}`).join('\n');
   const doc = await vscode.workspace.openTextDocument({
-    content: `# Current claudeCode.environmentVariables in ${editorLabel}\n# File: ${settingsPath}\n\n${content}`,
+    content: `# Current environment variables in ${label}\n# File: ${settingsUri ? settingsUri.fsPath : '(none)'}\n\n${content}`,
     language: 'properties',
   });
   await vscode.window.showTextDocument(doc, { preview: true });
@@ -1339,7 +1850,7 @@ async function cmdDebugTestProfile(context, profilesProvider) {
     const testProfile = makeProfile(`Test-${Date.now()}`, TEMPLATES['DeepSeek']);
     const profiles = loadProfiles(context);
     profiles.push(testProfile);
-    saveProfiles(context, profiles);
+    await saveProfiles(context, profiles);
     profilesProvider.refresh();
     vscode.window.showInformationMessage(
       `Debug test profile "${testProfile.name}" created (${profiles.length} total). Check sidebar.`
@@ -1350,39 +1861,158 @@ async function cmdDebugTestProfile(context, profilesProvider) {
 }
 
 // ── Debug: Show Extension State ──
-function cmdDebugShowState(context) {
+async function cmdDebugShowState(context) {
   try {
     const profiles = loadProfiles(context);
-    const activeId = getActiveProfileId(context);
     const editorLabel = getEditorLabel();
     const settingsPath = detectSettingsJsonPath();
-    const currentVars = readCurrentEnvVars();
+    const folder = getContextFolder();
+    const detected = _monitor ? await _monitor.check() : await detectActiveProfile(context);
+    let currentVars = [];
+    try { currentVars = await readCurrentEnvVars(folder); } catch (_) { /* reported via detected.error */ }
 
     const lines = [
-      `Editor: ${editorLabel}`, `Settings path: ${settingsPath}`,
-      `Settings exists: ${fs.existsSync(settingsPath)}`,
+      `Editor: ${editorLabel}`, `User settings path: ${settingsPath}`,
+      `User settings exists: ${fs.existsSync(settingsPath)}`,
+      `Storage target: ${getStorageTarget()} → ${describeTarget(folder)}`,
+      ...(getStorageTarget() === 'workspace' && folder ? [`Local settings file: ${localSettingsUri(folder).fsPath}`] : []),
       `Profiles stored: ${profiles.length}`,
-      `Active profile ID: ${activeId || '(none)'}`,
+      `Secrets cached: ${_secretCache.size}`,
+      `Detected state: ${detected.state}${detected.profile ? ` (${detected.profile.name}, id=${detected.profile.id})` : ''}`,
+      ...(detected.closest ? [`Closest profile: ${detected.closest.profile.name} — differs in ${detected.closest.diffs.join(', ')}`] : []),
+      ...(detected.error ? [`Read error: ${detected.error}`] : []),
       `Current env vars: ${currentVars.length}`,
       ``, `--- Profiles ---`,
     ];
     for (const p of profiles) {
       lines.push(`  - ${p.name} (id=${p.id}, ${p.variables.length} vars)${p.notes ? ' 📝' : ''}`);
     }
-    lines.push(``, `--- Current settings.json ---`);
+    lines.push(``, `--- Current ${describeTarget(folder)} ---`);
     for (const v of currentVars) {
-      const dv = v.name.includes('TOKEN') || v.name.includes('AUTH')
-        ? (v.value ? v.value.slice(0, 12) + '...' : '(empty)')
-        : (v.value || '(empty)');
-      lines.push(`  ${v.name}=${dv}`);
+      lines.push(`  ${v.name}=${maskValue(v.name, v.value) || '(empty)'}`);
     }
     const content = lines.join('\n');
-    vscode.workspace.openTextDocument({ content, language: 'text' }).then(doc => {
-      vscode.window.showTextDocument(doc, { preview: true });
-    });
+    const doc = await vscode.workspace.openTextDocument({ content, language: 'text' });
+    await vscode.window.showTextDocument(doc, { preview: true });
   } catch (err) {
     vscode.window.showErrorMessage(`Debug show state failed: ${err.message}`);
   }
+}
+
+// ═══════════════════════════════════════════════
+//  STORAGE TARGET CHANGES
+// ═══════════════════════════════════════════════
+
+/**
+ * Runs when claudeSwitch.storageTarget changes. Switching to "workspace" removes
+ * claudeCode.environmentVariables from user settings (saving it as a profile first
+ * if it doesn't match one), so there is never a user-level value to compete with.
+ * Only the focused window acts — the setting change reaches every window.
+ */
+async function onStorageTargetChanged(context, profilesProvider) {
+  const target = getStorageTarget();
+  if (!vscode.window.state.focused) { profilesProvider.refresh(); return; }
+
+  if (target === 'user') {
+    profilesProvider.refresh();
+    vscode.window.showInformationMessage('Claude API Switch now saves profiles to user settings (shared by every window). Apply a profile to write it there.');
+    return;
+  }
+
+  const userVars = readUserEnvVars();
+  if (userVars.length === 0) {
+    await removeUserEnvVars(); // clear an empty [] left behind, if any
+    profilesProvider.refresh();
+    vscode.window.showInformationMessage(`Claude API Switch now saves profiles per workspace (${LOCAL_SETTINGS_DIR}/${LOCAL_SETTINGS_FILE}).`);
+    return;
+  }
+
+  const profiles = loadProfiles(context);
+  const current = normalizeVars(userVars);
+  let matched = profiles.find(p => diffVars(normalizeVars(p.variables), current).length === 0);
+  let backedUp = false;
+  if (!matched) {
+    matched = makeProfile(
+      `User settings backup ${new Date().toISOString().slice(0, 10)}`, userVars,
+      'Saved automatically when switching to per-workspace storage.'
+    );
+    profiles.push(matched);
+    await saveProfiles(context, profiles);
+    backedUp = true;
+  }
+
+  const cleanup = await removeUserEnvVars();
+  profilesProvider.refresh();
+
+  const msg = cleanup.error
+    ? `Claude API Switch now saves profiles per workspace, but claudeCode.environmentVariables could not be removed from user settings: ${cleanup.error}`
+    : `Claude API Switch now saves profiles per workspace. Removed claudeCode.environmentVariables from user settings` +
+      (backedUp ? ` (saved as profile "${matched.name}").` : '.');
+  const applyHere = (vscode.workspace.workspaceFolders || []).length ? `Apply "${matched.name}" here` : null;
+  const show = cleanup.error ? vscode.window.showWarningMessage : vscode.window.showInformationMessage;
+  const pick = await show(msg, ...(applyHere ? [applyHere] : []));
+  if (!pick || pick !== applyHere) return;
+
+  const result = await applyProfileVariables(context, matched);
+  if (!result) return;
+  if (result.success) {
+    await recordUsage(context, matched.id);
+    profilesProvider.refresh();
+    vscode.window.showInformationMessage(formatApplySuccess(matched.name, result));
+  } else {
+    vscode.window.showErrorMessage(`Failed to apply: ${result.error || 'Unknown error'}`);
+  }
+}
+
+// ═══════════════════════════════════════════════
+//  STATUS BAR
+// ═══════════════════════════════════════════════
+
+function renderStatusBar(item, result) {
+  const where = describeTarget(result.folder);
+  const lines = [];
+  item.backgroundColor = undefined;
+
+  switch (result.state) {
+    case 'match':
+      item.text = `$(star-full) ${result.profile.name}`;
+      lines.push(`**Active:** ${result.profile.name}`, `**Saved in:** ${where}`);
+      break;
+    case 'modified':
+      item.text = '$(warning) Claude API: modified';
+      item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+      lines.push(`**The settings in ${where} don't match any saved profile.**`);
+      if (result.closest) {
+        lines.push(`Closest: "${result.closest.profile.name}" — differs in \`${result.closest.diffs.join('`, `')}\``);
+      }
+      break;
+    case 'error':
+      item.text = '$(error) Claude API';
+      item.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+      lines.push(`**Could not read ${where}:** ${result.error}`);
+      break;
+    case 'no-folder':
+      item.text = '$(server-environment) Claude API';
+      lines.push('Saving per workspace, but no folder is open.');
+      break;
+    default:
+      item.text = '$(server-environment) Claude API';
+      lines.push(`No profile applied in ${where}.`);
+  }
+
+  if (result.userVarsPresent) {
+    lines.push('$(warning) `claudeCode.environmentVariables` is set in user settings again — apply a profile to remove it.');
+  }
+  const checked = result.checkedAt ? result.checkedAt.toLocaleTimeString() : '—';
+  lines.push(
+    '---',
+    `Last verified ${checked} · [Switch profile](command:claudeSwitch.quickSwitch) · ` +
+    `[Change storage](command:claudeSwitch.selectStorageTarget) · [Re-check](command:claudeSwitch.refreshProfiles)`
+  );
+
+  const md = new vscode.MarkdownString(lines.join('\n\n'), true);
+  md.isTrusted = true;
+  item.tooltip = md;
 }
 
 // ═══════════════════════════════════════════════
@@ -1396,8 +2026,12 @@ function activate(context) {
 
   logInfo(`Detected editor: ${editorLabel}`);
   logInfo(`Remote context: ${remoteName || 'local (none)'}`);
-  logInfo(`Target settings: ${settingsPath}`);
+  logInfo(`Storage target: ${getStorageTarget()}`);
+  logInfo(`User settings: ${settingsPath}`);
   logInfo(`Extension kind: ${vscode.env.uiKind === vscode.UIKind.Web ? 'web' : 'desktop'}`);
+
+  _monitor = new ActiveProfileMonitor(context);
+  context.subscriptions.push(_monitor);
 
   const profilesProvider = new ApiProfilesProvider(context);
 
@@ -1411,53 +2045,101 @@ function activate(context) {
     context.subscriptions.push(vscode.commands.registerCommand(cmd, handler));
   };
 
-  register('claudeSwitch.addProfile',         () => cmdAddProfile(context, profilesProvider));
-  register('claudeSwitch.editProfile',        (item) => cmdEditProfile(context, profilesProvider, item));
-  register('claudeSwitch.deleteProfile',      (item) => cmdDeleteProfile(context, profilesProvider, item));
-  register('claudeSwitch.applyProfile',       (item) => cmdApplyProfile(context, profilesProvider, item));
-  register('claudeSwitch.duplicateProfile',   (item) => cmdDuplicateProfile(context, profilesProvider, item));
-  register('claudeSwitch.exportProfile',      (item) => cmdExportProfile(item));
-  register('claudeSwitch.importProfile',      () => cmdImportProfile(context, profilesProvider));
-  register('claudeSwitch.exportAll',          () => cmdExportAll(context));
-  register('claudeSwitch.importAll',          () => cmdImportAll(context, profilesProvider));
-  register('claudeSwitch.importFromCurrent',  () => cmdImportFromCurrent(context, profilesProvider));
-  register('claudeSwitch.editAsJson',         (item) => cmdEditAsJson(context, profilesProvider, item));
-  register('claudeSwitch.testProfile',        (item) => cmdTestProfile(context, profilesProvider, item));
-  register('claudeSwitch.quickSwitch',        () => cmdQuickSwitch(context, profilesProvider));
-  register('claudeSwitch.clearUsageStats',    () => cmdClearUsageStats(context, profilesProvider));
-  register('claudeSwitch.refreshProfiles',    () => profilesProvider.refresh());
-  register('claudeSwitch.viewCurrentConfig',  () => cmdViewCurrentConfig());
-  register('claudeSwitch.debugTestProfile',   () => cmdDebugTestProfile(context, profilesProvider));
-  register('claudeSwitch.debugShowState',     () => cmdDebugShowState(context));
+  register('claudeSwitch.addProfile',          () => cmdAddProfile(context, profilesProvider));
+  register('claudeSwitch.editProfile',         (item) => cmdEditProfile(context, profilesProvider, item));
+  register('claudeSwitch.deleteProfile',       (item) => cmdDeleteProfile(context, profilesProvider, item));
+  register('claudeSwitch.applyProfile',        (item) => cmdApplyProfile(context, profilesProvider, item));
+  register('claudeSwitch.duplicateProfile',    (item) => cmdDuplicateProfile(context, profilesProvider, item));
+  register('claudeSwitch.exportProfile',       (item) => cmdExportProfile(item));
+  register('claudeSwitch.importProfile',       () => cmdImportProfile(context, profilesProvider));
+  register('claudeSwitch.exportAll',           () => cmdExportAll(context));
+  register('claudeSwitch.importAll',           () => cmdImportAll(context, profilesProvider));
+  register('claudeSwitch.importFromCurrent',   () => cmdImportFromCurrent(context, profilesProvider));
+  register('claudeSwitch.editAsJson',          (item) => cmdEditAsJson(context, profilesProvider, item));
+  register('claudeSwitch.testProfile',         (item) => cmdTestProfile(context, profilesProvider, item));
+  register('claudeSwitch.quickSwitch',         () => cmdQuickSwitch(context, profilesProvider));
+  register('claudeSwitch.selectStorageTarget', () => cmdSelectStorageTarget());
+  register('claudeSwitch.clearUsageStats',     () => cmdClearUsageStats(context, profilesProvider));
+  register('claudeSwitch.refreshProfiles',     async () => { await loadSecretCache(context); profilesProvider.refresh(); });
+  register('claudeSwitch.viewCurrentConfig',   () => cmdViewCurrentConfig());
+  register('claudeSwitch.debugTestProfile',    () => cmdDebugTestProfile(context, profilesProvider));
+  register('claudeSwitch.debugShowState',      () => cmdDebugShowState(context));
 
-  // ── Status bar item — click to quick-switch, shows active profile ──
+  // ── Status bar item — click to quick-switch, shows the *verified* active profile ──
   const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBarItem.command = 'claudeSwitch.quickSwitch';
+  statusBarItem.text = '$(server-environment) Claude API';
   statusBarItem.tooltip = 'Claude API Switch — Click to switch profile';
   context.subscriptions.push(statusBarItem);
-
-  function updateStatusBar() {
-    const activeId = getActiveProfileId(context);
-    if (activeId) {
-      const profiles = loadProfiles(context);
-      const active = profiles.find(p => p.id === activeId);
-      if (active) {
-        statusBarItem.text = `$(star-full) ${active.name}`;
-        statusBarItem.tooltip = `Active: ${active.name} — Click to switch`;
-      } else {
-        statusBarItem.text = '$(server-environment) Claude API';
-        statusBarItem.tooltip = 'Claude API Switch — Click to switch profile';
-      }
-    } else {
-      statusBarItem.text = '$(server-environment) Claude API';
-      statusBarItem.tooltip = 'Claude API Switch — Click to switch profile';
-    }
-  }
-  updateStatusBar();
   statusBarItem.show();
 
-  // Refresh status bar when tree view refreshes
-  profilesProvider.onDidChangeTreeData(() => updateStatusBar());
+  context.subscriptions.push(_monitor.onDidCheck(({ result, changed }) => {
+    renderStatusBar(statusBarItem, result);
+    if (changed) profilesProvider.redraw();
+  }));
+
+  // ── Re-verify whenever the source of truth may have changed ──
+  const check = () => _monitor.check();
+  const watcher = vscode.workspace.createFileSystemWatcher(`**/${LOCAL_SETTINGS_DIR}/${LOCAL_SETTINGS_FILE}`);
+
+  let pollTimer = null;
+  function restartPolling() {
+    if (pollTimer) clearInterval(pollTimer);
+    const seconds = vscode.workspace.getConfiguration(EXT_NAMESPACE).get(SETTING_REFRESH_SECONDS, 30);
+    pollTimer = seconds > 0 ? setInterval(check, Math.max(5, seconds) * 1000) : null;
+  }
+
+  context.subscriptions.push(
+    watcher,
+    watcher.onDidCreate(check), watcher.onDidChange(check), watcher.onDidDelete(check),
+    vscode.workspace.onDidChangeConfiguration(e => {
+      if (e.affectsConfiguration(`${EXT_NAMESPACE}.${SETTING_STORAGE_TARGET}`)) {
+        onStorageTargetChanged(context, profilesProvider);
+      } else if (e.affectsConfiguration(`${CONFIG_NAMESPACE}.${CONFIG_KEY}`)) {
+        check();
+      }
+      if (e.affectsConfiguration(`${EXT_NAMESPACE}.${SETTING_REFRESH_SECONDS}`)) restartPolling();
+    }),
+    vscode.workspace.onDidChangeWorkspaceFolders(check),
+    // Multi-root: the "current" folder follows the active editor
+    vscode.window.onDidChangeActiveTextEditor(() => {
+      if ((vscode.workspace.workspaceFolders || []).length > 1 && getStorageTarget() === 'workspace') check();
+    }),
+    // Coming back to this window: pick up profile/secret edits made in another window
+    vscode.window.onDidChangeWindowState(async (state) => {
+      if (!state.focused) return;
+      await loadSecretCache(context);
+      check();
+    }),
+    context.secrets.onDidChange(async (e) => {
+      if (!e.key.startsWith(`${EXT_NAMESPACE}.secret:`)) return;
+      const value = await context.secrets.get(e.key);
+      if (value === undefined) _secretCache.delete(e.key);
+      else _secretCache.set(e.key, value);
+      profilesProvider.redraw();
+      check();
+    }),
+    // Periodic backstop for changes no event reports (e.g. edits made outside VS Code)
+    { dispose: () => { if (pollTimer) clearInterval(pollTimer); } },
+  );
+  restartPolling();
+
+  // ── Async startup: load secrets, migrate plaintext tokens, first verification ──
+  (async () => {
+    try {
+      await context.globalState.update(STORAGE_KEY_LEGACY_ACTIVE_ID, undefined);
+      await loadSecretCache(context);
+      const stored = context.globalState.get(STORAGE_KEY_PROFILES) || [];
+      const hasPlaintextSecrets = stored.some(p => (p.variables || []).some(v => !v.secret && v.value && isSecretVar(v.name)));
+      if (hasPlaintextSecrets) {
+        logInfo('Moving profile tokens into SecretStorage.');
+        await saveProfiles(context, loadProfiles(context));
+      }
+    } catch (e) {
+      logError('Startup migration failed', e);
+    }
+    profilesProvider.refresh();
+  })();
 
   logInfo('Extension activated.');
 }
