@@ -1,5 +1,5 @@
 {
-  "name": "claude-switch",
+  "name": "pnnl-claude-switch",
   "displayName": "Claude API Switch",
   "description": "Manage & switch Claude Code API endpoints from the sidebar. Test connectivity, track usage, one-click apply.",
   "version": "1.2.0",
