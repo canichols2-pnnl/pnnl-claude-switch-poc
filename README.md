@@ -120,8 +120,8 @@ Each profile in the sidebar shows its name, notes preview, and usage count — a
 Or from the command line:
 
 ```bash
-code --install-extension pnnl-claude-switch-1.3.0.vsix     # VS Code
-cursor --install-extension pnnl-claude-switch-1.3.0.vsix   # Cursor
+code --install-extension pnnl-claude-switch-<version>.vsix     # VS Code
+cursor --install-extension pnnl-claude-switch-<version>.vsix   # Cursor
 ```
 
 ### Build and install from source
@@ -133,7 +133,7 @@ git clone https://github.com/canichols2-pnnl/pnnl-claude-switch-poc.git
 cd pnnl-claude-switch-poc
 npm ci                 # installs @vscode/vsce from package-lock.json
 npm run package        # → pnnl-claude-switch-<version>.vsix in the repo root
-code --install-extension pnnl-claude-switch-1.3.0.vsix --force
+code --install-extension pnnl-claude-switch-<version>.vsix --force
 ```
 
 `--force` replaces an already-installed version. Reload the VS Code window afterwards (**Developer: Reload Window**). The `.vsix` file is git-ignored.
@@ -272,7 +272,7 @@ pnnl-claude-switch-poc/
 ├── package.json           # Extension manifest (commands, settings, menus) + npm scripts
 ├── extension.js           # All extension logic (single file, no runtime dependencies)
 ├── .vscode/launch.json    # F5 → Extension Development Host
-├── .github/workflows/     # Release workflow (builds the VSIX, creates a GitHub Release)
+├── .github/              # Build & Release workflow + version script (pre-releases, releases)
 ├── images/                # Icon files
 ├── LICENSE                # MIT
 ├── CHANGELOG.md
@@ -284,22 +284,31 @@ pnnl-claude-switch-poc/
 
 ## 📦 Releasing
 
-Releases are built by [.github/workflows/publish.yml](.github/workflows/publish.yml). Every pull request to `main` also builds the `.vsix` and uploads it as a workflow artifact, so packaging is verified before release. Pushing a `v*` tag packages the extension and creates a **GitHub Release** with the `.vsix` attached and the matching CHANGELOG section as release notes.
+Everything is built by [.github/workflows/publish.yml](.github/workflows/publish.yml) (**Build & Release** in the Actions tab). **Git tags are the source of truth for versions**: the latest full release is the highest `vX.Y.Z` tag, and every other version is derived from it — you never have to edit the version by hand.
 
-1. Bump `"version"` in `package.json` (e.g. `1.2.0`) and run `npm install` so `package-lock.json` matches
-2. Add a `## [1.2.0] — YYYY-MM-DD` section to `CHANGELOG.md`
-3. Commit and merge to `main`
-4. Tag and push — the tag **must** equal `v` + the `package.json` version, or the workflow fails:
+| What happens | Version (latest release `v1.2.0`) | Result |
+|---|---|---|
+| Pull request to `main` | `1.3.0-pr.<pr>.<run>` | `.vsix` uploaded as a workflow artifact only |
+| Push / merge to `main` | `1.3.0-pre.<run>` | GitHub **pre-release** with the `.vsix` — never marked *Latest* |
+| **Run workflow** (manual) | `1.3.0` (next minor by default) | Full GitHub **release**, marked *Latest* |
+| Push a `vX.Y.Z` tag | the tag | Full release of that tag (alternative to the manual run) |
 
-   ```bash
-   git checkout main && git pull
-   git tag v1.2.0
-   git push origin v1.2.0
-   ```
+`<run>` is the workflow run number, so each pre-release is newer than the last, and all pre-releases of `1.3.0` sort below the real `1.3.0`.
 
-5. Watch the **Publish Extension** run under the repo's **Actions** tab; when it finishes the release appears under **Releases**
+### Testing a pre-release
 
-Tags with a suffix (e.g. `v1.3.0-beta.1`) are published as pre-releases. To re-run a failed release, delete the release and tag on GitHub, fix the problem, and push the tag again.
+Every merge to `main` produces one. Download `pnnl-claude-switch-<version>.vsix` from the newest pre-release on the [Releases page](https://github.com/canichols2-pnnl/pnnl-claude-switch-poc/releases) and install it with `code --install-extension <file> --force`. Only the newest 10 pre-releases are kept.
+
+### Cutting a full release
+
+1. (Optional) Add a `## [1.3.0] — YYYY-MM-DD` section to `CHANGELOG.md` in a PR and merge it — it becomes the top of the release notes (GitHub's generated list of merged PRs is appended either way)
+2. Go to **Actions → Build & Release → Run workflow**, leave the branch as `main`
+3. Choose the bump (`minor` default, `patch`, or `major`) — or type an exact version like `1.3.0`
+4. Run it. The workflow builds `main`, tags `v1.3.0`, publishes the release as *Latest*, deletes the `1.3.0-pre.*` pre-releases it supersedes, and commits `"version": "1.3.0"` to `package.json` on `main`
+
+The run refuses versions that already exist or aren't newer than the latest release. Pushing a `vX.Y.Z` tag yourself does the same build and release (without the `package.json` commit).
+
+`package.json`'s `version` only matters for local `npm run package` builds; CI stamps the computed version into the package before building.
 
 ### Marketplace / Open VSX (optional)
 
