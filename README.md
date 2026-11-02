@@ -196,10 +196,11 @@ To use a different profile per project, set:
 
 (or run **Choose Where Profiles Are Saved** from the sidebar `⋯` menu / Quick Switch). In workspace mode:
 
-- **Apply** writes the profile's variables into the `env` block of `<workspace folder>/.claude/settings.local.json`, which Claude Code reads per project. Other content in that file (permissions, your own env vars) is preserved; only keys belonging to profiles are replaced. Empty values are not written.
+- **Apply** writes the profile's variables into the `env` block of `.claude/settings.local.json` (see below for the exact location), which Claude Code reads per project. Other content in that file (permissions, your own env vars) is preserved; only keys belonging to profiles are replaced. Empty values are not written.
 - `.claude/settings.local.json` is added to the repo's `.git/info/exclude` so API keys are never committed (no tracked file is changed).
 - `claudeCode.environmentVariables` is **removed from user settings**, so there is no user-level value competing with the workspace one. If the removed value didn't match a saved profile, it is first saved as a "User settings backup" profile.
-- In multi-root workspaces you're asked which folder to apply to; the status bar follows the folder of the active editor.
+- **Multi-root workspaces:** the profile is always written to the **first** workspace folder, because that is the folder the Claude Code extension starts sessions in and reads `.claude/settings.local.json` from (the other folders are only added as extra directories). Which file is open makes no difference; to change the target, reorder the workspace folders.
+- **Exact file location** follows Claude Code's rules for `settings.local.json`: on **Windows** it is `<first folder>/.claude/settings.local.json`. On **macOS / Linux** — including WSL, SSH and dev-container windows, where Claude runs on Linux — it is the **git repository root's** `.claude/settings.local.json` (the main checkout's root for a linked worktree), falling back to the folder itself outside git or when the repo root is your home directory. The status bar tooltip shows the exact file.
 
 Claude reads environment variables when a session starts — **restart running Claude sessions** after switching.
 

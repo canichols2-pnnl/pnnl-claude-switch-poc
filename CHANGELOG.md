@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file.
 - **Renamed package to `pnnl-claude-switch`** — the VSIX is now `pnnl-claude-switch-<version>.vsix` and the extension ID is `claude-switch.pnnl-claude-switch`. Settings (`claudeSwitch.*`) and commands are unchanged
 - **Automatic pre-releases** — every push to `main` publishes a GitHub pre-release (`<next patch>-pre.<run>`, never marked latest) with the VSIX; full releases are cut on demand with **Actions → Build & Release → Run workflow** (or by pushing a `vX.Y.Z` tag). Versions are derived from git tags, so `package.json` no longer has to be bumped by hand
 
+### Fixed
+- **Multi-root workspaces** — per-workspace mode now always writes to the **first** workspace folder, the folder the Claude Code extension starts sessions in. Previously it asked for a folder and the status bar followed the active editor, so choosing another folder wrote a file Claude never read
+- **`settings.local.json` location matches Claude Code** — on macOS / Linux (including WSL, SSH and container windows) the file is written to the git repository root (main checkout for linked worktrees), where Claude reads it; Windows keeps it in the folder. The status bar tooltip shows the exact path, and the file is watched even when it is outside the workspace
+
 ### Upgrading from 1.2.0 or earlier
 VS Code treats the new ID as a different extension, so saved profiles (and their tokens) don't carry over automatically:
 1. In the old version, run **Export All Profiles** (sidebar `⋯`) — the export includes tokens, so keep the file private
