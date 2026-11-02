@@ -7,4 +7,4 @@ tsconfig.json
 **/*.ts
 **/*.map
 images/get_start.gif
-claude-api-switch-profiles.json
+claude-api-switch-profiles.json.github/**

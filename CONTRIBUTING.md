@@ -7,6 +7,7 @@ Thanks for your interest in contributing! 🎉
 1. Fork the repo and clone it locally
 2. Open the folder in VS Code or Cursor
 3. Press `F5` to launch the Extension Development Host and test your changes
+   (build an installable `.vsix` with `npm ci && npm run package` — see the README)
 4. Make your changes and verify they work
 5. Submit a PR
 

@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] — 2026-11-02
+
+### Added
+- **Per-workspace profiles** — new `claudeSwitch.storageTarget` user setting (`user` | `workspace`, default `user`). In `workspace` mode, Apply / Quick Switch write the profile into the `env` block of `<folder>/.claude/settings.local.json` instead of user settings, so each VS Code window can use a different API key. Existing file content is merged, not replaced
+- **User-settings cleanup** — choosing `workspace` removes `claudeCode.environmentVariables` from user settings (backing it up as a profile first if it doesn't match one), so there is no competing user-level value
+- **Git safety** — `.claude/settings.local.json` is added to `.git/info/exclude` (works from sub-folders and linked worktrees)
+- **Verified active profile** — the status bar and ★ marker are now derived from what is actually in the settings file, re-checked on file changes, settings changes, window focus and a periodic poll (`claudeSwitch.statusRefreshIntervalSeconds`, default 30). Shows `⚠ modified` when the file was changed outside this window
+- **Choose Where Profiles Are Saved** command (sidebar `⋯` menu and Quick Switch)
+- Activates on startup so the status bar is available without opening the sidebar
+
+### Changed
+- README documents building/installing the VSIX locally (`npm ci && npm run package`), F5 debugging, and the release process; added `npm run package` script and `.vscode/launch.json`
+- Release workflow now packages the VSIX and creates a GitHub Release (tag must match `package.json` version; notes come from this changelog)
+- Repository links point to `canichols2-pnnl/pnnl-claude-switch-poc`
+- API tokens/keys in profiles are stored in VS Code SecretStorage instead of plain extension state (existing profiles are migrated on first start) and are masked in the sidebar
+- API test sends `ANTHROPIC_AUTH_TOKEN` as `Authorization: Bearer` (and `ANTHROPIC_API_KEY` as `x-api-key`), matching Claude Code
+- Profile editor webview now has a Content Security Policy
+
+### Removed
+- Translated README and the language switcher — documentation is English-only
+
+### Fixed
+- Editing a profile no longer relies on extension state returning the same object reference
+- State updates are awaited, so quick successive actions don't lose writes
+- Settings-file fallback writer handles `]` inside string values
+
 ## [1.1.4] — 2026-08-08
 
 ### Added
@@ -16,7 +42,6 @@ All notable changes to this project will be documented in this file.
 ## [1.1.1] — 2026-06-05
 
 ### Changed
-- **Bilingual README** — README now available in English ([README.md](README.md)) and Chinese ([README_zh.md](README_zh.md)), with language switch badges
 - **Quick Start section** — Added step-by-step "3-step quick start" guide for adding the first profile, prominently featured at the top of the README
 - **Extension UI explainer** — Added a table mapping every UI element (sidebar buttons, status bar, command palette) to its function
 

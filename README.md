@@ -2,12 +2,10 @@
 
 > Manage and switch Claude Code API endpoint profiles — **no Claude Code login required, just plug in your API key and go.**
 
-[![Version](https://img.shields.io/badge/version-1.1.3-blue)](https://github.com/zhhwss/claude_switch)
+[![Release](https://img.shields.io/github/v/release/canichols2-pnnl/pnnl-claude-switch-poc)](https://github.com/canichols2-pnnl/pnnl-claude-switch-poc/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![VS Code](https://img.shields.io/badge/VS%20Code-1.74%2B-007acc)](https://code.visualstudio.com/)
 [![Cursor](https://img.shields.io/badge/Cursor-compatible-8b5cf6)](https://cursor.sh/)
-
-[English](README.md) | [中文](README_zh.md)
 
 ---
 
@@ -26,7 +24,7 @@ This extension gives you a **sidebar UI** to manage those configurations as name
 The simplest operation: **add a profile, apply it, done.**
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/zhhwss/claude_switch/main/images/get_start.gif" alt="Get started with Claude API Switch" width="800" />
+  <img src="https://raw.githubusercontent.com/canichols2-pnnl/pnnl-claude-switch-poc/main/images/get_start.gif" alt="Get started with Claude API Switch" width="800" />
 </p>
 
 ### Step ① — Open the sidebar
@@ -58,11 +56,11 @@ The extension is designed so you can figure it out just by looking at the sideba
 | **+ button** | Sidebar toolbar | Add a new profile |
 | **↓ button** | Sidebar toolbar | Capture current `settings.json` config as a profile |
 | **🔄 button** | Sidebar toolbar | Quick switch between profiles |
-| **⋯ menu** | Sidebar toolbar | Export All / Import Profile(s) from JSON |
+| **⋯ menu** | Sidebar toolbar | Export All / Import Profile(s) from JSON / choose where profiles are saved |
 | **✓ Apply** | Inline on each profile | One-click write to `settings.json` |
 | **▶ Test** | Inline on each profile | Test the API endpoint (latency, model, errors) |
 | **✎ Edit** | Inline on each profile | Open the web form editor |
-| **Status bar** | Bottom of editor window | Shows current profile — click to quick-switch |
+| **Status bar** | Bottom of editor window | Shows the profile actually found in the settings file (re-verified automatically) — click to quick-switch |
 | **Command palette** | `Cmd+Shift+P` | Search "Claude API Switch" for all commands |
 
 Each profile in the sidebar shows its name, notes preview, and usage count — active profile is marked with a **★** star.
@@ -84,6 +82,9 @@ Each profile in the sidebar shows its name, notes preview, and usage count — a
 | 📤 **Bulk Export/Import** | Backup or share all profiles as a single JSON file; import accepts a single profile or a whole file |
 | 🔧 **JSON Editor** | Toggle the editor between Form and JSON views — Save validates the syntax before updating |
 | 🌐 **Auto-Detect Editor** | Works with Cursor, VS Code, VSCodium, Windsurf, and other VS Code-based editors |
+| 🗂️ **Per-Workspace Profiles** | Optional `claudeSwitch.storageTarget: "workspace"` mode — each VS Code window uses its own profile via `.claude/settings.local.json` |
+| ✅ **Verified Active Profile** | The ★ / status bar reflect what is really in the settings file, re-checked on file changes, window focus and a periodic poll |
+| 🔐 **Secret Storage** | API tokens/keys are stored in VS Code SecretStorage (OS keychain), not plain extension state, and masked in the sidebar |
 | 🐛 **Debug Tools** | Built-in debug commands to inspect state and test the storage pipeline |
 
 ---
@@ -91,7 +92,7 @@ Each profile in the sidebar shows its name, notes preview, and usage count — a
 ## 📸 Demo
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/zhhwss/claude_switch/main/images/get_start.gif" alt="Claude API Switch demo" width="800" />
+  <img src="https://raw.githubusercontent.com/canichols2-pnnl/pnnl-claude-switch-poc/main/images/get_start.gif" alt="Claude API Switch demo" width="800" />
 </p>
 
 ---
@@ -110,31 +111,43 @@ Each profile in the sidebar shows its name, notes preview, and usage count — a
 
 ## 🚀 Installation
 
-### Install from VSIX
+### Install a released VSIX
 
-1. Download the latest `.vsix` file from [GitHub Releases](https://github.com/zhhwss/claude_switch/releases)
-2. Open VS Code / Cursor
-3. Go to Extensions (`Cmd+Shift+X`) → **…** menu → **Install from VSIX…**
-4. Select the downloaded `.vsix` file
-5. Reload the editor
+1. Download `claude-switch-<version>.vsix` from the latest [GitHub Release](https://github.com/canichols2-pnnl/pnnl-claude-switch-poc/releases/latest)
+2. In VS Code / Cursor open Extensions (`Ctrl+Shift+X` / `Cmd+Shift+X`) → **…** menu → **Install from VSIX…**
+3. Select the downloaded file and reload the window
 
 Or from the command line:
 
 ```bash
-# VS Code
-code --install-extension claude-switch-1.1.1.vsix
-
-# Cursor
-cursor --install-extension claude-switch-1.1.1.vsix
+code --install-extension claude-switch-1.2.0.vsix     # VS Code
+cursor --install-extension claude-switch-1.2.0.vsix   # Cursor
 ```
 
-### From Source (Development)
+### Build and install from source
+
+Prerequisites: **Node.js 20+** and **npm** (the only dependency is the packaging tool, [`@vscode/vsce`](https://github.com/microsoft/vscode-vsce); the extension itself has no runtime dependencies and no compile step).
 
 ```bash
-git clone https://github.com/zhhwss/claude_switch.git
-cd claude-switch
-# Open in VS Code / Cursor and press F5 to launch Extension Development Host
+git clone https://github.com/canichols2-pnnl/pnnl-claude-switch-poc.git
+cd pnnl-claude-switch-poc
+npm ci                 # installs @vscode/vsce from package-lock.json
+npm run package        # → claude-switch-<version>.vsix in the repo root
+code --install-extension claude-switch-1.2.0.vsix --force
 ```
+
+`--force` replaces an already-installed version. Reload the VS Code window afterwards (**Developer: Reload Window**). The `.vsix` file is git-ignored.
+
+To check exactly what goes into the package without building it: `npx vsce ls`.
+
+> **Corporate npm mirror?** If `npm ci` fails with `403 Forbidden` from an internal registry (e.g. Artifactory blocking a `@vscode/vsce` dependency by security policy), you can't build locally until the mirror allows it — download the `.vsix` from the build on any pull request (**Actions** → run → **Artifacts**) or from a release instead.
+
+### Run it without installing (Extension Development Host)
+
+1. Open the repo folder in VS Code
+2. Press **F5** (or **Run and Debug → Run Extension**) — this uses [.vscode/launch.json](.vscode/launch.json) and opens a second window with the extension loaded from source
+3. After editing `extension.js`, run **Developer: Reload Window** in that second window to pick up the change
+4. Logs (`[Claude API Switch] …`) appear in the **Debug Console** of the first window
 
 ---
 
@@ -170,6 +183,40 @@ cd claude-switch
 
 ---
 
+## 🗂️ Where profiles are saved — user vs. workspace
+
+By default, **Apply** writes the profile into `claudeCode.environmentVariables` in your **user** `settings.json`. That setting is shared by every VS Code window, so applying a profile in one window changes it for all of them.
+
+To use a different profile per project, set:
+
+```jsonc
+// User settings
+"claudeSwitch.storageTarget": "workspace"
+```
+
+(or run **Choose Where Profiles Are Saved** from the sidebar `⋯` menu / Quick Switch). In workspace mode:
+
+- **Apply** writes the profile's variables into the `env` block of `<workspace folder>/.claude/settings.local.json`, which Claude Code reads per project. Other content in that file (permissions, your own env vars) is preserved; only keys belonging to profiles are replaced. Empty values are not written.
+- `.claude/settings.local.json` is added to the repo's `.git/info/exclude` so API keys are never committed (no tracked file is changed).
+- `claudeCode.environmentVariables` is **removed from user settings**, so there is no user-level value competing with the workspace one. If the removed value didn't match a saved profile, it is first saved as a "User settings backup" profile.
+- In multi-root workspaces you're asked which folder to apply to; the status bar follows the folder of the active editor.
+
+Claude reads environment variables when a session starts — **restart running Claude sessions** after switching.
+
+### Active profile verification
+
+The extension never trusts a stored "last applied" id. The ★ in the sidebar and the status bar are derived by comparing the variables actually present in the target file against your saved profiles:
+
+| Status bar | Meaning |
+|---|---|
+| `★ Profile name` | Settings exactly match that profile |
+| `⚠ Claude API: modified` | Settings were changed outside the extension (tooltip shows the closest profile and which keys differ) |
+| `Claude API` | No profile variables are set in the target |
+
+It re-checks when `.claude/settings.local.json` or user settings change, when the window regains focus (picking up changes made in other windows), and every `claudeSwitch.statusRefreshIntervalSeconds` (default 30, `0` disables polling).
+
+---
+
 ## 🔧 Commands Reference
 
 | Command | How to access | Description |
@@ -179,7 +226,8 @@ cd claude-switch
 | `Edit Profile as JSON` | Right-click | Open the editor in JSON mode — toggle between Form and JSON views, Save validates the syntax first |
 | `Apply Profile` | Inline ✓ | Write to `settings.json` |
 | `Test API Connection` | Inline ▶ | Test endpoint connectivity |
-| `Quick Switch Profile` | `Cmd+Shift+P` | Fast profile switching |
+| `Quick Switch Profile` | `Cmd+Shift+P` / status bar | Fast profile switching |
+| `Choose Where Profiles Are Saved` | Sidebar ⋯ / Quick Switch | Toggle between user settings and per-workspace storage |
 | `Duplicate Profile` | Right-click | Clone a profile |
 | `Import Profile from Current Settings` | Sidebar ↓ | Capture current config |
 | `Export Profile as JSON` | Right-click | Export single profile |
@@ -210,61 +258,52 @@ Also works on Windows and Linux with platform-aware path detection.
 
 ## 🛠 Development
 
-```bash
-git clone https://github.com/zhhwss/claude_switch.git
-cd claude-switch
-# Open in VS Code / Cursor
-# Press F5 to launch Extension Development Host
-```
+See [Build and install from source](#build-and-install-from-source) and [Run it without installing](#run-it-without-installing-extension-development-host) above.
 
 ### Debug Commands
 
-- **`Debug: Show Extension State`** — Inspect all profiles, active ID, settings path, and current config
+- **`Debug: Show Extension State`** — Inspect profiles, storage target, detected active profile, settings paths, and current config (secrets masked)
 - **`Debug: Create Test Profile`** — Create a test profile bypassing the webview to verify the storage pipeline
 
 ### Project Structure
 
 ```
-claude_switch/
-├── package.json           # Extension manifest
-├── extension.js           # All extension logic (single file, zero npm dependencies)
-├── .github/workflows/     # CI/CD for publishing
+pnnl-claude-switch-poc/
+├── package.json           # Extension manifest (commands, settings, menus) + npm scripts
+├── extension.js           # All extension logic (single file, no runtime dependencies)
+├── .vscode/launch.json    # F5 → Extension Development Host
+├── .github/workflows/     # Release workflow (builds the VSIX, creates a GitHub Release)
 ├── images/                # Icon files
 ├── LICENSE                # MIT
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md
-├── README.md
-└── README_zh.md
+└── README.md
 ```
 
 ---
 
-## 📦 Publishing
+## 📦 Releasing
 
-### VS Code / Cursor Marketplace
+Releases are built by [.github/workflows/publish.yml](.github/workflows/publish.yml). Every pull request to `main` also builds the `.vsix` and uploads it as a workflow artifact, so packaging is verified before release. Pushing a `v*` tag packages the extension and creates a **GitHub Release** with the `.vsix` attached and the matching CHANGELOG section as release notes.
 
-```bash
-# Install vsce
-npm install -g @vscode/vsce
+1. Bump `"version"` in `package.json` (e.g. `1.2.0`) and run `npm install` so `package-lock.json` matches
+2. Add a `## [1.2.0] — YYYY-MM-DD` section to `CHANGELOG.md`
+3. Commit and merge to `main`
+4. Tag and push — the tag **must** equal `v` + the `package.json` version, or the workflow fails:
 
-# Create a publisher (one-time)
-# https://marketplace.visualstudio.com/manage/createpublisher
+   ```bash
+   git checkout main && git pull
+   git tag v1.2.0
+   git push origin v1.2.0
+   ```
 
-# Package & publish
-vsce package
-vsce publish
+5. Watch the **Publish Extension** run under the repo's **Actions** tab; when it finishes the release appears under **Releases**
 
-# Or publish to Open VSX Registry
-npm install -g ovsx
-ovsx publish
-```
+Tags with a suffix (e.g. `v1.3.0-beta.1`) are published as pre-releases. To re-run a failed release, delete the release and tag on GitHub, fix the problem, and push the tag again.
 
-### CI/CD (GitHub Actions)
+### Marketplace / Open VSX (optional)
 
-1. Create a Personal Access Token from [Azure DevOps](https://dev.azure.com/)
-2. Add it as a GitHub secret: `VSCE_PAT`
-3. (Optional) Add an Open VSX token as `OVSX_PAT`
-4. Push a version tag: `git tag v1.0.0 && git push --tags`
+The workflow has commented-out steps for publishing to the VS Code Marketplace (`VSCE_PAT` secret, an Azure DevOps PAT for a [publisher](https://marketplace.visualstudio.com/manage/createpublisher)) and Open VSX (`OVSX_PAT`). Uncomment them and add the secrets to enable.
 
 ---
 

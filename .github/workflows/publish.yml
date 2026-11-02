@@ -1,12 +1,20 @@
 name: Publish Extension
 
+# Pull requests: build the VSIX and upload it as a workflow artifact.
+# Tags like v1.2.0 (must match package.json "version"): build the VSIX and
+# create a GitHub Release with it attached.
 on:
   push:
     tags:
       - 'v*'
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write   # create the release and upload the asset
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -14,15 +22,65 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
+          cache: npm
 
-      - name: Install vsce
-        run: npm install -g @vscode/vsce
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Publish to VS Code Marketplace
-        run: vsce publish --pat ${{ secrets.VSCE_PAT }}
-
-      - name: Publish to Open VSX Registry
+      - name: Read version (and check tag matches it)
+        id: version
         run: |
-          npm install -g ovsx
-          ovsx publish --pat ${{ secrets.OVSX_PAT }}
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          [ "$GITHUB_REF_TYPE" = "tag" ] || exit 0
+          TAG="${GITHUB_REF_NAME}"
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::Tag $TAG does not match package.json version v$VERSION"
+            exit 1
+          fi
+
+      - name: Syntax check
+        run: node --check extension.js
+
+      - name: Package VSIX
+        run: npx vsce package --out "claude-switch-${{ steps.version.outputs.version }}.vsix"
+
+      - name: Extract release notes from CHANGELOG
+        if: github.ref_type == 'tag'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "No CHANGELOG entry for $VERSION." > release-notes.md
+            echo "::warning::CHANGELOG.md has no section for [$VERSION]"
+          fi
+          cat release-notes.md
+
+      - name: Upload VSIX as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-switch-${{ steps.version.outputs.version }}
+          path: claude-switch-${{ steps.version.outputs.version }}.vsix
+
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PRERELEASE=""
+          case "$GITHUB_REF_NAME" in *-*) PRERELEASE="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" \
+            "claude-switch-${{ steps.version.outputs.version }}.vsix" \
+            --title "Claude API Switch $GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            $PRERELEASE
+
+      # - name: Publish to VS Code Marketplace
+      #   run: npx vsce publish --packagePath "claude-switch-${{ steps.version.outputs.version }}.vsix" --pat ${{ secrets.VSCE_PAT }}
+
+      # - name: Publish to Open VSX Registry
+      #   run: npx ovsx publish "claude-switch-${{ steps.version.outputs.version }}.vsix" --pat ${{ secrets.OVSX_PAT }}
