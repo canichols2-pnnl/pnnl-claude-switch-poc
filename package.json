@@ -2,17 +2,17 @@
   "name": "claude-switch",
   "displayName": "Claude API Switch",
   "description": "Manage & switch Claude Code API endpoints from the sidebar. Test connectivity, track usage, one-click apply.",
-  "version": "1.1.4",
+  "version": "1.2.0",
   "publisher": "claude-switch",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/zhhwss/claude_switch"
+    "url": "https://github.com/canichols2-pnnl/pnnl-claude-switch-poc"
   },
   "bugs": {
-    "url": "https://github.com/zhhwss/claude_switch/issues"
+    "url": "https://github.com/canichols2-pnnl/pnnl-claude-switch-poc/issues"
   },
-  "homepage": "https://github.com/zhhwss/claude_switch#readme",
+  "homepage": "https://github.com/canichols2-pnnl/pnnl-claude-switch-poc#readme",
   "keywords": [
     "claude",
     "claude-code",
@@ -41,6 +41,7 @@
     "Other"
   ],
   "activationEvents": [
+    "onStartupFinished",
     "onView:claudeSwitch.profilesView"
   ],
   "main": "./extension.js",
@@ -61,6 +62,32 @@
           "name": "API Profiles"
         }
       ]
+    },
+    "configuration": {
+      "title": "Claude API Switch",
+      "properties": {
+        "claudeSwitch.storageTarget": {
+          "type": "string",
+          "enum": [
+            "user",
+            "workspace"
+          ],
+          "default": "user",
+          "scope": "application",
+          "enumDescriptions": [
+            "Write the applied profile to `claudeCode.environmentVariables` in user settings.json (shared by every VS Code window).",
+            "Write the applied profile to the `env` block of `.claude/settings.local.json` in each workspace folder, so each window can use a different profile. Switching to this removes `claudeCode.environmentVariables` from user settings."
+          ],
+          "markdownDescription": "Where **Apply Profile** / **Quick Switch** save the profile's environment variables.\n\n- `user` — `claudeCode.environmentVariables` in user settings (one profile for all windows).\n- `workspace` — `env` in `<folder>/.claude/settings.local.json`, read by Claude Code per project. The file is added to `.git/info/exclude` so keys are not committed, and `claudeCode.environmentVariables` is removed from user settings."
+        },
+        "claudeSwitch.statusRefreshIntervalSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "scope": "application",
+          "markdownDescription": "How often (in seconds) the status bar re-checks the settings file against your saved profiles, to catch changes made outside this window. File-change, settings-change and window-focus events always trigger a check; this is a backstop. `0` disables polling (minimum 5 when enabled)."
+        }
+      }
     },
     "commands": [
       {
@@ -129,6 +156,11 @@
         "icon": "$(replace-all)"
       },
       {
+        "command": "claudeSwitch.selectStorageTarget",
+        "title": "Choose Where Profiles Are Saved (User / Workspace)",
+        "icon": "$(gear)"
+      },
+      {
         "command": "claudeSwitch.clearUsageStats",
         "title": "Clear Usage Statistics",
         "icon": "$(clear-all)"
@@ -190,6 +222,11 @@
           "command": "claudeSwitch.importAll",
           "when": "view == claudeSwitch.profilesView",
           "group": "import@2"
+        },
+        {
+          "command": "claudeSwitch.selectStorageTarget",
+          "when": "view == claudeSwitch.profilesView",
+          "group": "settings@1"
         }
       ],
       "view/item/context": [
@@ -230,6 +267,9 @@
         }
       ]
     }
+  },
+  "scripts": {
+    "package": "vsce package"
   },
   "devDependencies": {
     "@vscode/vsce": "^3.9.2"
