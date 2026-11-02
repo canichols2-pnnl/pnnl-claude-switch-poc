@@ -84,9 +84,10 @@ const TEMPLATES = {
     main: 'claude-haiku-5-5-project', opus: 'claude-sonnet-5-5-project', sonnet: 'claude-sonnet-5-5-project',
     haiku: 'claude-haiku-5-5-project', subagent: 'claude-haiku-5-5-project', effort: 'low',
   }),
-  // TODO: fill in birthright model names (GET <base>/v1/models with a birthright key)
+  // Birthright keys have no Opus/Fable models, so the opus alias maps to Sonnet
   'AI Incubator — Birthright': aiIncubatorVars({
-    main: '', opus: '', sonnet: '', haiku: '', subagent: '', effort: 'medium',
+    main: 'claude-sonnet-5-5-birthright', opus: 'claude-sonnet-5-5-birthright', sonnet: 'claude-sonnet-5-5-birthright',
+    haiku: 'claude-haiku-5-5-birthright', subagent: 'claude-haiku-5-5-birthright', effort: 'medium',
   }),
   'Anthropic API': [
     { name: 'ANTHROPIC_BASE_URL',              value: 'https://api.anthropic.com' },
@@ -126,7 +127,7 @@ const TEMPLATE_NOTES = {
   'AI Incubator — Project: Balanced':    'Sonnet 5.5 main, Haiku 5.5 subagents (Opus via /model) — project key',
   'AI Incubator — Project: Max Quality': 'Fable 5.1 main, Opus 5.5 subagents, high effort — highest cost — project key',
   'AI Incubator — Project: Economy':     'Haiku 5.5 main and subagents, low effort — lowest cost — project key',
-  'AI Incubator — Birthright':           'Birthright key — fill in the model names your key can use (see /v1/models)',
+  'AI Incubator — Birthright':           'Sonnet 5.5 main, Haiku 5.5 subagents — personal birthright key (no Opus/Fable)',
   'Anthropic API':                       'Direct Anthropic API with an API key (x-api-key)',
   'Local Proxy':                         'A proxy on localhost that manages auth itself',
   'Empty':                               '',
@@ -233,7 +234,7 @@ function formatApplySuccess(profileName, result) {
   if (result.cleanup?.removed) parts.push('Removed claudeCode.environmentVariables from user settings.');
   if (result.gitExcluded === false) parts.push(`⚠ Could not add ${LOCAL_SETTINGS_FILE} to .git/info/exclude — make sure it is not committed.`);
   parts.push(result.folder
-    ? 'Running Claude sessions here pick up changed values automatically (restart them if this profile drops a variable the previous one set).'
+    ? 'Running Claude sessions here switch to the new URL and key right away; model and effort changes apply to new sessions (or use /model in a running one).'
     : 'Restart any running Claude sessions to pick it up.');
   return parts.join(' ');
 }

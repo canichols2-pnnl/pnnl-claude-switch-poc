@@ -31,11 +31,23 @@ Pick a mode with the **`claudeSwitch.storageTarget`** user setting, or run **Cho
 | Setting value | `"workspace"` | `"user"` |
 | Where Apply writes | `env` block of the workspace's `.claude/settings.local.json` | `claudeCode.environmentVariables` in your VS Code **user** `settings.json` |
 | Scope | **This workspace only.** Every window/project can use a different profile | **Every VS Code window** shares the same profile |
-| Running Claude sessions | Pick up changed values automatically when the file is saved¹ | Must be restarted (variables are passed only when Claude starts) |
+| Running Claude sessions | Switch **URL and key** immediately; **models/effort** need a new session (see below) | Must be restarted (variables are passed only when Claude starts) |
 | Committed to git? | No. The file is added to `.git/info/exclude` | No (user settings live outside the repo) |
 | Use it when | You work on more than one project/key (the normal PNNL case) | You only ever use one key everywhere |
 
-¹ Claude Code re-applies the `env` block when the file changes. A variable that a *previous* profile set and the new one doesn't stay set in already-running sessions until they're restarted.
+### What updates in a running session, and what needs a new one
+
+Claude Code re-reads the `env` block of `.claude/settings.local.json` when the file changes, but not everything in it takes effect mid-session:
+
+| Variable(s) | After you apply a profile in workspace mode |
+|---|---|
+| `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` | **Live.** The next request in an open session uses the new endpoint and key |
+| `ANTHROPIC_MODEL` | **New session.** An open session keeps the model it started with; run `/model <name>` to change it in place |
+| `ANTHROPIC_DEFAULT_OPUS/SONNET/HAIKU_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_EFFORT_LEVEL` | **New session.** Treat these as read at startup |
+| A variable the previous profile set and the new one doesn't | **New session.** Removing a variable doesn't unset it in a running session |
+| Anything in user mode (`claudeCode.environmentVariables`) | **New session.** VS Code passes these only when Claude starts |
+
+**Switching between keys that can use different models** (e.g. project → birthright) is the case to watch. The open session immediately uses the new key but still asks for the old model, and the gateway rejects it (`team not allowed to access model … Tried to access claude-opus-5-5-project`). After that kind of switch, start a new Claude session, or run `/model` with a model the new key allows.
 
 ### Workspace mode in detail
 
@@ -71,12 +83,12 @@ New profiles start from a template. You only paste your key into `ANTHROPIC_AUTH
 | **AI Incubator — Project: Balanced** | `claude-sonnet-5-5-project` | `claude-haiku-5-5-project` | medium | Lower cost; Opus still available via `/model` |
 | **AI Incubator — Project: Max Quality** | `claude-fable-5-1-project` | `claude-opus-5-5-project` | high | Highest capability and cost |
 | **AI Incubator — Project: Economy** | `claude-haiku-5-5-project` | `claude-haiku-5-5-project` | low | Cheapest; quick or simple tasks |
-| **AI Incubator — Birthright** | *(fill in)* | *(fill in)* | medium | Your personal birthright key; fill in the models it can use |
+| **AI Incubator — Birthright** | `claude-sonnet-5-5-birthright` | `claude-haiku-5-5-birthright` | medium | Personal birthright key. No Opus/Fable, so the Opus alias maps to Sonnet |
 | **Anthropic API** | `claude-opus-5-5` | `claude-sonnet-5-5` | medium | Direct Anthropic API key |
 | **Local Proxy** | — | — | medium | A localhost proxy that handles auth |
 | **Empty** | — | — | — | Start from scratch |
 
-All AI Incubator templates point at `https://ai-incubator-api.pnnl.gov`, map Claude Code's Opus/Sonnet/Haiku aliases to the matching `-project` models, and set `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` (LiteLLM/Bedrock reject some Anthropic-only beta headers) and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`.
+All AI Incubator templates point at `https://ai-incubator-api.pnnl.gov`, map Claude Code's Opus/Sonnet/Haiku aliases to the matching `-project` (or `-birthright`) models, and set `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` (LiteLLM/Bedrock reject some Anthropic-only beta headers) and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`.
 
 To see exactly which models **your** key can use (it's a LiteLLM gateway):
 

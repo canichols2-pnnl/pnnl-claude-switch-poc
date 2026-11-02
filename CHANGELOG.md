@@ -7,9 +7,9 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - **Renamed to PNNL Claude API Switch** in the UI, messages and docs
 - **Workspace mode is now the default** (`claudeSwitch.storageTarget` defaults to `workspace`). If you were relying on the old user-level default, set it to `user`. Existing user-level variables stay in effect until you apply a profile in a workspace
-- **PNNL templates** replace the DeepSeek and Aliyun ones: AI Incubator Project (Recommended / Balanced / Max Quality / Economy), AI Incubator Birthright (model names to fill in), Anthropic API (now uses `ANTHROPIC_API_KEY` and current models) and Local Proxy. Templates show a description in the picker, which is saved as the new profile's notes
+- **PNNL templates** replace the DeepSeek and Aliyun ones: AI Incubator Project (Recommended / Balanced / Max Quality / Economy), AI Incubator Birthright (Sonnet 5.5 / Haiku 5.5 — birthright keys have no Opus), Anthropic API (now uses `ANTHROPIC_API_KEY` and current models) and Local Proxy. Templates show a description in the picker, which is saved as the new profile's notes
 - README rewritten around the purpose (workspace-local settings for PNNL developers) with a side-by-side comparison of the two modes
-- The apply confirmation no longer tells workspace-mode users to restart Claude: running sessions pick up changed values
+- The apply confirmation in workspace mode explains that URL and key switch immediately in running sessions, but model and effort changes need a new session (or `/model`). The README has a table of what updates live and what needs a new session
 - **Renamed package to `pnnl-claude-switch`** — the VSIX is now `pnnl-claude-switch-<version>.vsix` and the extension ID is `claude-switch.pnnl-claude-switch`. Settings (`claudeSwitch.*`) and commands are unchanged
 - **Automatic pre-releases** — every push to `main` publishes a GitHub pre-release (`<next patch>-pre.<run>`, never marked latest) with the VSIX; full releases are cut on demand with **Actions → Build & Release → Run workflow** (or by pushing a `vX.Y.Z` tag). Versions are derived from git tags, so `package.json` no longer has to be bumped by hand
 
