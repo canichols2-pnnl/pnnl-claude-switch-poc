@@ -4,8 +4,8 @@
 # Git tags are the source of truth: the latest full release is the highest
 # vMAJOR.MINOR.PATCH tag (no suffix). Everything else is derived from it.
 #
-#   push to main      → prerelease  MAJOR.(MINOR+1).0-pre.<run number>
-#   pull request      → build only  MAJOR.(MINOR+1).0-pr.<pr>.<run number>
+#   push to main      → prerelease  MAJOR.MINOR.(PATCH+1)-pre.<run number>
+#   pull request      → build only  MAJOR.MINOR.(PATCH+1)-pr.<pr>.<run number>
 #   workflow_dispatch → release     INPUT_VERSION, or latest bumped by INPUT_BUMP
 #   push of a v* tag  → release     the tag (prerelease if it has a "-suffix")
 #
@@ -25,21 +25,21 @@ else
   LATEST=$(node -p "require('./package.json').version")   # no releases yet
 fi
 IFS=. read -r MAJOR MINOR PATCH <<< "${LATEST%%-*}"
-NEXT_MINOR="$MAJOR.$((MINOR + 1)).0"
+NEXT_PATCH="$MAJOR.$MINOR.$((PATCH + 1))"
 
 case "${GITHUB_EVENT_NAME}" in
   pull_request)
-    VERSION="$NEXT_MINOR-pr.${PR_NUMBER:-0}.${GITHUB_RUN_NUMBER}"
+    VERSION="$NEXT_PATCH-pr.${PR_NUMBER:-0}.${GITHUB_RUN_NUMBER}"
     KIND=build
     ;;
   workflow_dispatch)
     if [ -n "${INPUT_VERSION:-}" ]; then
       VERSION=${INPUT_VERSION#v}
     else
-      case "${INPUT_BUMP:-minor}" in
+      case "${INPUT_BUMP:-patch}" in
         major) VERSION="$((MAJOR + 1)).0.0" ;;
-        minor) VERSION="$NEXT_MINOR" ;;
-        patch) VERSION="$MAJOR.$MINOR.$((PATCH + 1))" ;;
+        minor) VERSION="$MAJOR.$((MINOR + 1)).0" ;;
+        patch) VERSION="$NEXT_PATCH" ;;
         *) fail "Unknown bump '${INPUT_BUMP}'" ;;
       esac
     fi
@@ -55,7 +55,7 @@ case "${GITHUB_EVENT_NAME}" in
       VERSION=${GITHUB_REF_NAME#v}
       if [[ "$VERSION" == *-* ]]; then KIND=prerelease; else KIND=release; fi
     else
-      VERSION="$NEXT_MINOR-pre.${GITHUB_RUN_NUMBER}"
+      VERSION="$NEXT_PATCH-pre.${GITHUB_RUN_NUMBER}"
       KIND=prerelease
     fi
     ;;

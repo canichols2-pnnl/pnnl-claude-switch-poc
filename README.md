@@ -288,12 +288,12 @@ Everything is built by [.github/workflows/publish.yml](.github/workflows/publish
 
 | What happens | Version (latest release `v1.2.0`) | Result |
 |---|---|---|
-| Pull request to `main` | `1.3.0-pr.<pr>.<run>` | `.vsix` uploaded as a workflow artifact only |
-| Push / merge to `main` | `1.3.0-pre.<run>` | GitHub **pre-release** with the `.vsix` — never marked *Latest* |
-| **Run workflow** (manual) | `1.3.0` (next minor by default) | Full GitHub **release**, marked *Latest* |
+| Pull request to `main` | `1.2.1-pr.<pr>.<run>` | `.vsix` uploaded as a workflow artifact only |
+| Push / merge to `main` | `1.2.1-pre.<run>` | GitHub **pre-release** with the `.vsix` — never marked *Latest* |
+| **Run workflow** (manual) | `1.2.1` (next patch by default) | Full GitHub **release**, marked *Latest* |
 | Push a `vX.Y.Z` tag | the tag | Full release of that tag (alternative to the manual run) |
 
-`<run>` is the workflow run number, so each pre-release is newer than the last, and all pre-releases of `1.3.0` sort below the real `1.3.0`.
+`<run>` is the workflow run number, so each pre-release is newer than the last, and all pre-releases of `1.2.1` sort below the real `1.2.1`.
 
 ### Testing a pre-release
 
@@ -301,10 +301,10 @@ Every merge to `main` produces one. Download `pnnl-claude-switch-<version>.vsix`
 
 ### Cutting a full release
 
-1. (Optional) Add a `## [1.3.0] — YYYY-MM-DD` section to `CHANGELOG.md` in a PR and merge it — it becomes the top of the release notes (GitHub's generated list of merged PRs is appended either way)
+1. (Optional) Add a `## [1.2.1] — YYYY-MM-DD` section to `CHANGELOG.md` in a PR and merge it — it becomes the top of the release notes (GitHub's generated list of merged PRs is appended either way)
 2. Go to **Actions → Build & Release → Run workflow**, leave the branch as `main`
-3. Choose the bump (`minor` default, `patch`, or `major`) — or type an exact version like `1.3.0`
-4. Run it. The workflow builds `main`, tags `v1.3.0`, publishes the release as *Latest*, deletes the `1.3.0-pre.*` pre-releases it supersedes, and commits `"version": "1.3.0"` to `package.json` on `main`
+3. Choose the bump (`patch` default, `minor`, or `major`) — or type an exact version like `1.2.1`
+4. Run it. The workflow builds `main`, tags `v1.2.1`, publishes the release as *Latest*, deletes the `1.2.1-pre.*` pre-releases it supersedes, and commits `"version": "1.2.1"` to `package.json` on `main`
 
 The run refuses versions that already exist or aren't newer than the latest release. Pushing a `vX.Y.Z` tag yourself does the same build and release (without the `package.json` commit).
 

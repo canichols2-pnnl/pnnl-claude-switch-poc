@@ -3,8 +3,8 @@ name: Build & Release
 # Versions come from git tags — see .github/scripts/compute-version.sh.
 #
 #   Pull request to main  → build the VSIX, upload as a workflow artifact (no release)
-#   Push to main          → GitHub *pre-release* vX.(Y+1).0-pre.<run>, never marked "latest"
-#   Run workflow (manual) → full release (default: next minor), marked "latest"
+#   Push to main          → GitHub *pre-release* vX.Y.(Z+1)-pre.<run>, never marked "latest"
+#   Run workflow (manual) → full release (default: next patch), marked "latest"
 #   Push a vX.Y.Z tag     → full release of that tag (same as the manual run)
 on:
   pull_request:
@@ -17,8 +17,8 @@ on:
       bump:
         description: 'Version bump from the latest release (ignored if "version" is set)'
         type: choice
-        options: [minor, patch, major]
-        default: minor
+        options: [patch, minor, major]
+        default: patch
       version:
         description: 'Exact version to release, e.g. 1.4.0 (optional)'
         type: string

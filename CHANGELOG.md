@@ -2,16 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.3.0] — 2026-11-02
+## [1.2.1] — 2026-11-02
 
 ### Changed
 - **Renamed package to `pnnl-claude-switch`** — the VSIX is now `pnnl-claude-switch-<version>.vsix` and the extension ID is `claude-switch.pnnl-claude-switch`. Settings (`claudeSwitch.*`) and commands are unchanged
-- **Automatic pre-releases** — every push to `main` publishes a GitHub pre-release (`<next minor>-pre.<run>`, never marked latest) with the VSIX; full releases are cut on demand with **Actions → Build & Release → Run workflow** (or by pushing a `vX.Y.Z` tag). Versions are derived from git tags, so `package.json` no longer has to be bumped by hand
+- **Automatic pre-releases** — every push to `main` publishes a GitHub pre-release (`<next patch>-pre.<run>`, never marked latest) with the VSIX; full releases are cut on demand with **Actions → Build & Release → Run workflow** (or by pushing a `vX.Y.Z` tag). Versions are derived from git tags, so `package.json` no longer has to be bumped by hand
 
 ### Upgrading from 1.2.0 or earlier
 VS Code treats the new ID as a different extension, so saved profiles (and their tokens) don't carry over automatically:
 1. In the old version, run **Export All Profiles** (sidebar `⋯`) — the export includes tokens, so keep the file private
-2. Uninstall the old **Claude API Switch**, install `pnnl-claude-switch-1.3.0.vsix`, reload
+2. Uninstall the old **Claude API Switch**, install `pnnl-claude-switch-1.2.1.vsix`, reload
 3. Run **Import Profiles from JSON** and select the exported file, then delete it
 
 ## [1.2.0] — 2026-11-02
