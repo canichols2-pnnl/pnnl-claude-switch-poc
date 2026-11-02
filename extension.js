@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────
-// Claude API Switch — VS Code / Cursor Extension
+// PNNL Claude API Switch — VS Code / Cursor Extension
 //
 // Manage and switch Claude Code API endpoint
 // profiles from a sidebar tree-view. Supports
@@ -36,68 +36,100 @@ const GIT_EXCLUDE_PATTERN = `**/${LOCAL_SETTINGS_DIR}/${LOCAL_SETTINGS_FILE}`;
 /** Variable names whose values are kept in SecretStorage and masked in the UI */
 const SECRET_NAME_RE = /TOKEN|KEY|SECRET|PASSWORD/i;
 
-const LOG_PREFIX = '[Claude API Switch]';
+const LOG_PREFIX = '[PNNL Claude API Switch]';
 
 /** Standard env-var names */
 const STANDARD_VAR_NAMES = [
-  'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_MODEL',
+  'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL',
   'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL',
   'CLAUDE_CODE_EFFORT_LEVEL',
 ];
 
-/** Pre-built templates for common providers */
+/** AI Incubator — PNNL's LiteLLM gateway (lists models at <base>/v1/models) */
+const AI_INCUBATOR_URL = 'https://ai-incubator-api.pnnl.gov';
+
+/** Builds an AI Incubator profile: main model, the /model aliases, subagent model and effort. */
+function aiIncubatorVars({ main, opus, sonnet, haiku, subagent, effort }) {
+  return [
+    { name: 'ANTHROPIC_BASE_URL',                       value: AI_INCUBATOR_URL },
+    { name: 'ANTHROPIC_AUTH_TOKEN',                     value: '' },
+    { name: 'ANTHROPIC_MODEL',                          value: main },
+    { name: 'ANTHROPIC_DEFAULT_OPUS_MODEL',             value: opus },
+    { name: 'ANTHROPIC_DEFAULT_SONNET_MODEL',           value: sonnet },
+    { name: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',            value: haiku },
+    { name: 'CLAUDE_CODE_SUBAGENT_MODEL',               value: subagent },
+    { name: 'CLAUDE_CODE_EFFORT_LEVEL',                 value: effort },
+    // LiteLLM/Bedrock reject some Anthropic-only beta headers; skip non-essential calls to the gateway
+    { name: 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS',   value: '1' },
+    { name: 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', value: '1' },
+  ];
+}
+
+/** Pre-built templates (first one is the default suggestion) */
 const TEMPLATES = {
-  'DeepSeek': [
-    { name: 'ANTHROPIC_BASE_URL',              value: 'https://api.deepseek.com/anthropic' },
-    { name: 'ANTHROPIC_AUTH_TOKEN',             value: '' },
-    { name: 'ANTHROPIC_MODEL',                  value: 'deepseek-v4-pro[1m]' },
-    { name: 'ANTHROPIC_DEFAULT_OPUS_MODEL',     value: 'deepseek-v4-pro[1m]' },
-    { name: 'ANTHROPIC_DEFAULT_SONNET_MODEL',   value: 'deepseek-v4-pro[1m]' },
-    { name: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',    value: 'deepseek-v4-flash' },
-    { name: 'CLAUDE_CODE_SUBAGENT_MODEL',       value: 'deepseek-v4-flash' },
-    { name: 'CLAUDE_CODE_EFFORT_LEVEL',         value: 'max' },
-  ],
-  'Aliyun DashScope (Qwen)': [
-    { name: 'ANTHROPIC_BASE_URL',              value: 'https://dashscope.aliyuncs.com/apps/anthropic' },
-    { name: 'ANTHROPIC_AUTH_TOKEN',             value: '' },
-    { name: 'ANTHROPIC_MODEL',                  value: 'qwen3.7-max' },
-    { name: 'ANTHROPIC_DEFAULT_OPUS_MODEL',     value: 'qwen3.7-max' },
-    { name: 'ANTHROPIC_DEFAULT_SONNET_MODEL',   value: 'qwen3.7-max' },
-    { name: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',    value: 'qwen3.7-max' },
-    { name: 'CLAUDE_CODE_SUBAGENT_MODEL',       value: 'qwen3.7-max' },
-    { name: 'CLAUDE_CODE_EFFORT_LEVEL',         value: 'max' },
-  ],
-  'Anthropic Official': [
+  'AI Incubator — Project: Recommended': aiIncubatorVars({
+    main: 'claude-opus-5-5-project', opus: 'claude-opus-5-5-project', sonnet: 'claude-sonnet-5-5-project',
+    haiku: 'claude-haiku-5-5-project', subagent: 'claude-sonnet-5-5-project', effort: 'medium',
+  }),
+  'AI Incubator — Project: Balanced': aiIncubatorVars({
+    main: 'claude-sonnet-5-5-project', opus: 'claude-opus-5-5-project', sonnet: 'claude-sonnet-5-5-project',
+    haiku: 'claude-haiku-5-5-project', subagent: 'claude-haiku-5-5-project', effort: 'medium',
+  }),
+  'AI Incubator — Project: Max Quality': aiIncubatorVars({
+    main: 'claude-fable-5-1-project', opus: 'claude-fable-5-1-project', sonnet: 'claude-sonnet-5-5-project',
+    haiku: 'claude-haiku-5-5-project', subagent: 'claude-opus-5-5-project', effort: 'high',
+  }),
+  'AI Incubator — Project: Economy': aiIncubatorVars({
+    main: 'claude-haiku-5-5-project', opus: 'claude-sonnet-5-5-project', sonnet: 'claude-sonnet-5-5-project',
+    haiku: 'claude-haiku-5-5-project', subagent: 'claude-haiku-5-5-project', effort: 'low',
+  }),
+  // TODO: fill in birthright model names (GET <base>/v1/models with a birthright key)
+  'AI Incubator — Birthright': aiIncubatorVars({
+    main: '', opus: '', sonnet: '', haiku: '', subagent: '', effort: 'medium',
+  }),
+  'Anthropic API': [
     { name: 'ANTHROPIC_BASE_URL',              value: 'https://api.anthropic.com' },
-    { name: 'ANTHROPIC_AUTH_TOKEN',             value: '' },
-    { name: 'ANTHROPIC_MODEL',                  value: 'claude-sonnet-4-6' },
-    { name: 'ANTHROPIC_DEFAULT_OPUS_MODEL',     value: 'claude-opus-4-8' },
-    { name: 'ANTHROPIC_DEFAULT_SONNET_MODEL',   value: 'claude-sonnet-4-6' },
-    { name: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',    value: 'claude-haiku-4-5-20251001' },
-    { name: 'CLAUDE_CODE_SUBAGENT_MODEL',       value: 'claude-sonnet-4-6' },
-    { name: 'CLAUDE_CODE_EFFORT_LEVEL',         value: 'max' },
+    { name: 'ANTHROPIC_API_KEY',               value: '' },
+    { name: 'ANTHROPIC_MODEL',                 value: 'claude-opus-5-5' },
+    { name: 'ANTHROPIC_DEFAULT_OPUS_MODEL',    value: 'claude-opus-5-5' },
+    { name: 'ANTHROPIC_DEFAULT_SONNET_MODEL',  value: 'claude-sonnet-5-5' },
+    { name: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',   value: 'claude-haiku-5-5' },
+    { name: 'CLAUDE_CODE_SUBAGENT_MODEL',      value: 'claude-sonnet-5-5' },
+    { name: 'CLAUDE_CODE_EFFORT_LEVEL',        value: 'medium' },
   ],
   'Local Proxy': [
     { name: 'ANTHROPIC_BASE_URL',              value: 'http://127.0.0.1:15722' },
-    { name: 'ANTHROPIC_AUTH_TOKEN',             value: 'PROXY_MANAGED' },
-    { name: 'ANTHROPIC_MODEL',                  value: '' },
-    { name: 'ANTHROPIC_DEFAULT_OPUS_MODEL',     value: '' },
-    { name: 'ANTHROPIC_DEFAULT_SONNET_MODEL',   value: '' },
-    { name: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',    value: '' },
-    { name: 'CLAUDE_CODE_SUBAGENT_MODEL',       value: '' },
-    { name: 'CLAUDE_CODE_EFFORT_LEVEL',         value: 'max' },
+    { name: 'ANTHROPIC_AUTH_TOKEN',            value: 'PROXY_MANAGED' },
+    { name: 'ANTHROPIC_MODEL',                 value: '' },
+    { name: 'ANTHROPIC_DEFAULT_OPUS_MODEL',    value: '' },
+    { name: 'ANTHROPIC_DEFAULT_SONNET_MODEL',  value: '' },
+    { name: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',   value: '' },
+    { name: 'CLAUDE_CODE_SUBAGENT_MODEL',      value: '' },
+    { name: 'CLAUDE_CODE_EFFORT_LEVEL',        value: 'medium' },
   ],
   'Empty': [
     { name: 'ANTHROPIC_BASE_URL',              value: '' },
-    { name: 'ANTHROPIC_AUTH_TOKEN',             value: '' },
-    { name: 'ANTHROPIC_MODEL',                  value: '' },
-    { name: 'ANTHROPIC_DEFAULT_OPUS_MODEL',     value: '' },
-    { name: 'ANTHROPIC_DEFAULT_SONNET_MODEL',   value: '' },
-    { name: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',    value: '' },
-    { name: 'CLAUDE_CODE_SUBAGENT_MODEL',       value: '' },
-    { name: 'CLAUDE_CODE_EFFORT_LEVEL',         value: 'max' },
+    { name: 'ANTHROPIC_AUTH_TOKEN',            value: '' },
+    { name: 'ANTHROPIC_MODEL',                 value: '' },
+    { name: 'ANTHROPIC_DEFAULT_OPUS_MODEL',    value: '' },
+    { name: 'ANTHROPIC_DEFAULT_SONNET_MODEL',  value: '' },
+    { name: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',   value: '' },
+    { name: 'CLAUDE_CODE_SUBAGENT_MODEL',      value: '' },
+    { name: 'CLAUDE_CODE_EFFORT_LEVEL',        value: 'medium' },
   ],
+};
+
+/** One-line descriptions shown in the template picker and saved as the new profile's notes */
+const TEMPLATE_NOTES = {
+  'AI Incubator — Project: Recommended': 'Opus 5.5 main, Sonnet 5.5 subagents, medium effort — project key',
+  'AI Incubator — Project: Balanced':    'Sonnet 5.5 main, Haiku 5.5 subagents (Opus via /model) — project key',
+  'AI Incubator — Project: Max Quality': 'Fable 5.1 main, Opus 5.5 subagents, high effort — highest cost — project key',
+  'AI Incubator — Project: Economy':     'Haiku 5.5 main and subagents, low effort — lowest cost — project key',
+  'AI Incubator — Birthright':           'Birthright key — fill in the model names your key can use (see /v1/models)',
+  'Anthropic API':                       'Direct Anthropic API with an API key (x-api-key)',
+  'Local Proxy':                         'A proxy on localhost that manages auth itself',
+  'Empty':                               '',
 };
 
 // ═══════════════════════════════════════════════
@@ -148,7 +180,7 @@ function getEditorLabel() {
 
 function getStorageTarget() {
   const value = vscode.workspace.getConfiguration(EXT_NAMESPACE).get(SETTING_STORAGE_TARGET);
-  return value === 'workspace' ? 'workspace' : 'user';
+  return value === 'user' ? 'user' : 'workspace';
 }
 
 /**
@@ -200,7 +232,9 @@ function formatApplySuccess(profileName, result) {
   const parts = [`✅ "${profileName}" applied to ${result.targetLabel}.`];
   if (result.cleanup?.removed) parts.push('Removed claudeCode.environmentVariables from user settings.');
   if (result.gitExcluded === false) parts.push(`⚠ Could not add ${LOCAL_SETTINGS_FILE} to .git/info/exclude — make sure it is not committed.`);
-  parts.push('Restart any running Claude sessions to pick it up.');
+  parts.push(result.folder
+    ? 'Running Claude sessions here pick up changed values automatically (restart them if this profile drops a variable the previous one set).'
+    : 'Restart any running Claude sessions to pick it up.');
   return parts.join(' ');
 }
 
@@ -437,7 +471,7 @@ async function ensureGitExcluded(folder) {
     const prefix = content && !content.endsWith('\n') ? '\n' : '';
     await vscode.workspace.fs.createDirectory(infoDir);
     await vscode.workspace.fs.writeFile(excludeUri,
-      Buffer.from(`${content}${prefix}# Claude API Switch — per-workspace API keys\n${GIT_EXCLUDE_PATTERN}\n`, 'utf-8'));
+      Buffer.from(`${content}${prefix}# PNNL Claude API Switch — per-workspace API keys\n${GIT_EXCLUDE_PATTERN}\n`, 'utf-8'));
     return true;
   } catch (e) {
     logError('Failed to update .git/info/exclude', e);
@@ -1037,7 +1071,7 @@ function getWebviewHtml(profile, isNew, mode = 'form') {
 
 <div class="section">
   <label>Notes (optional)</label>
-  <textarea id="profileNotes" placeholder="e.g. DeepSeek production account, expires 2026-12-31...">${escHtml(notesVal)}</textarea>
+  <textarea id="profileNotes" placeholder="e.g. AI Incubator project key for <project>, expires 2027-09-30...">${escHtml(notesVal)}</textarea>
 </div>
 
 <div class="section">
@@ -1394,7 +1428,7 @@ async function cmdAddProfile(context, profilesProvider) {
   try {
     const name = await vscode.window.showInputBox({
       prompt: 'Enter a name for the new API profile',
-      placeHolder: 'e.g. DeepSeek, Aliyun Qwen, My Custom API',
+      placeHolder: 'e.g. AI Incubator — my project, Birthright, Local proxy',
       validateInput: (value) => {
         if (!value?.trim()) return 'Name is required';
         if (loadProfiles(context).some(p => p.name === value.trim())) return 'A profile with this name already exists';
@@ -1410,15 +1444,20 @@ async function cmdAddProfile(context, profilesProvider) {
     if (!templateChoice) return;
 
     let initialVars = [];
+    let initialNotes = '';
     if (templateChoice === 'Start from template') {
-      const tplName = await vscode.window.showQuickPick(Object.keys(TEMPLATES), { placeHolder: 'Choose a template' });
-      if (!tplName) return;
-      initialVars = TEMPLATES[tplName] || [];
+      const picked = await vscode.window.showQuickPick(
+        Object.keys(TEMPLATES).map(t => ({ label: t, detail: TEMPLATE_NOTES[t] || undefined })),
+        { placeHolder: 'Choose a template' }
+      );
+      if (!picked) return;
+      initialVars = TEMPLATES[picked.label] || [];
+      initialNotes = TEMPLATE_NOTES[picked.label] || '';
     } else {
       initialVars = [{ name: 'ANTHROPIC_BASE_URL', value: '' }];
     }
 
-    const profile = makeProfile(name, initialVars);
+    const profile = makeProfile(name, initialVars, initialNotes);
     logInfo(`Opening editor for new profile: ${name}`);
 
     try {
@@ -1802,16 +1841,16 @@ async function cmdSelectStorageTarget() {
   const current = getStorageTarget();
   const choice = await vscode.window.showQuickPick([
     {
-      label: 'User settings', value: 'user',
+      label: 'Workspace mode', value: 'workspace',
+      description: `(default)${current === 'workspace' ? ' · current' : ''}`,
+      detail: `env block of ${LOCAL_SETTINGS_DIR}/${LOCAL_SETTINGS_FILE} for this workspace — each window/project uses its own profile`,
+    },
+    {
+      label: 'User mode', value: 'user',
       description: current === 'user' ? '(current)' : '',
       detail: 'claudeCode.environmentVariables in user settings.json — one profile shared by every window',
     },
-    {
-      label: 'This workspace', value: 'workspace',
-      description: current === 'workspace' ? '(current)' : '',
-      detail: `env block of ${LOCAL_SETTINGS_DIR}/${LOCAL_SETTINGS_FILE} per workspace folder — each window can use its own profile`,
-    },
-  ], { placeHolder: 'Where should Claude API Switch save the applied profile?' });
+  ], { placeHolder: 'Where should PNNL Claude API Switch save the applied profile?' });
   if (!choice || choice.value === current) return;
   // The configuration change listener handles the cleanup / migration.
   await vscode.workspace.getConfiguration(EXT_NAMESPACE)
@@ -1865,7 +1904,7 @@ async function cmdViewCurrentConfig() {
 // ── Debug: Create Test Profile (no webview) ──
 async function cmdDebugTestProfile(context, profilesProvider) {
   try {
-    const testProfile = makeProfile(`Test-${Date.now()}`, TEMPLATES['DeepSeek']);
+    const testProfile = makeProfile(`Test-${Date.now()}`, TEMPLATES[Object.keys(TEMPLATES)[0]]);
     const profiles = loadProfiles(context);
     profiles.push(testProfile);
     await saveProfiles(context, profiles);
@@ -1933,7 +1972,7 @@ async function onStorageTargetChanged(context, profilesProvider) {
 
   if (target === 'user') {
     profilesProvider.refresh();
-    vscode.window.showInformationMessage('Claude API Switch now saves profiles to user settings (shared by every window). Apply a profile to write it there.');
+    vscode.window.showInformationMessage('PNNL Claude API Switch now saves profiles to user settings (shared by every window). Apply a profile to write it there.');
     return;
   }
 
@@ -1941,7 +1980,7 @@ async function onStorageTargetChanged(context, profilesProvider) {
   if (userVars.length === 0) {
     await removeUserEnvVars(); // clear an empty [] left behind, if any
     profilesProvider.refresh();
-    vscode.window.showInformationMessage(`Claude API Switch now saves profiles per workspace (${LOCAL_SETTINGS_DIR}/${LOCAL_SETTINGS_FILE}).`);
+    vscode.window.showInformationMessage(`PNNL Claude API Switch now saves profiles per workspace (${LOCAL_SETTINGS_DIR}/${LOCAL_SETTINGS_FILE}).`);
     return;
   }
 
@@ -1963,8 +2002,8 @@ async function onStorageTargetChanged(context, profilesProvider) {
   profilesProvider.refresh();
 
   const msg = cleanup.error
-    ? `Claude API Switch now saves profiles per workspace, but claudeCode.environmentVariables could not be removed from user settings: ${cleanup.error}`
-    : `Claude API Switch now saves profiles per workspace. Removed claudeCode.environmentVariables from user settings` +
+    ? `PNNL Claude API Switch now saves profiles per workspace, but claudeCode.environmentVariables could not be removed from user settings: ${cleanup.error}`
+    : `PNNL Claude API Switch now saves profiles per workspace. Removed claudeCode.environmentVariables from user settings` +
       (backedUp ? ` (saved as profile "${matched.name}").` : '.');
   const applyHere = (vscode.workspace.workspaceFolders || []).length ? `Apply "${matched.name}" here` : null;
   const show = cleanup.error ? vscode.window.showWarningMessage : vscode.window.showInformationMessage;
@@ -2090,7 +2129,7 @@ function activate(context) {
   const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBarItem.command = 'claudeSwitch.quickSwitch';
   statusBarItem.text = '$(server-environment) Claude API';
-  statusBarItem.tooltip = 'Claude API Switch — Click to switch profile';
+  statusBarItem.tooltip = 'PNNL Claude API Switch — Click to switch profile';
   context.subscriptions.push(statusBarItem);
   statusBarItem.show();
 

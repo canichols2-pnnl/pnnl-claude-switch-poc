@@ -1,7 +1,7 @@
 {
   "name": "pnnl-claude-switch",
-  "displayName": "Claude API Switch",
-  "description": "Manage & switch Claude Code API endpoints from the sidebar. Test connectivity, track usage, one-click apply.",
+  "displayName": "PNNL Claude API Switch",
+  "description": "Per-workspace Claude Code API profiles for PNNL developers — AI Incubator templates, connectivity tests, one-click switching.",
   "version": "1.2.0",
   "publisher": "claude-switch",
   "license": "MIT",
@@ -17,14 +17,14 @@
     "claude",
     "claude-code",
     "anthropic",
+    "pnnl",
+    "ai-incubator",
+    "litellm",
     "api",
     "switch",
-    "deepseek",
-    "qwen",
-    "endpoint",
     "profile",
-    "environment",
-    "cursor"
+    "workspace",
+    "environment"
   ],
   "icon": "images/icon.png",
   "galleryBanner": {
@@ -50,7 +50,7 @@
       "activitybar": [
         {
           "id": "claudeSwitchSidebar",
-          "title": "Claude API Switch",
+          "title": "PNNL Claude API Switch",
           "icon": "$(server-environment)"
         }
       ]
@@ -64,21 +64,21 @@
       ]
     },
     "configuration": {
-      "title": "Claude API Switch",
+      "title": "PNNL Claude API Switch",
       "properties": {
         "claudeSwitch.storageTarget": {
           "type": "string",
           "enum": [
-            "user",
-            "workspace"
+            "workspace",
+            "user"
           ],
-          "default": "user",
+          "default": "workspace",
           "scope": "application",
           "enumDescriptions": [
-            "Write the applied profile to `claudeCode.environmentVariables` in user settings.json (shared by every VS Code window).",
-            "Write the applied profile to the `env` block of `.claude/settings.local.json` in each workspace folder, so each window can use a different profile. Switching to this removes `claudeCode.environmentVariables` from user settings."
+            "Default. Write the applied profile to the `env` block of `.claude/settings.local.json` for this workspace (the file Claude Code reads for the first workspace folder), so every VS Code window can use its own key and models. Running Claude sessions pick up changed values. Removes `claudeCode.environmentVariables` from user settings.",
+            "Write the applied profile to `claudeCode.environmentVariables` in user settings.json — one profile shared by every VS Code window; Claude sessions must be restarted to pick it up."
           ],
-          "markdownDescription": "Where **Apply Profile** / **Quick Switch** save the profile's environment variables.\n\n- `user` — `claudeCode.environmentVariables` in user settings (one profile for all windows).\n- `workspace` — `env` in `<folder>/.claude/settings.local.json`, read by Claude Code per project. The file is added to `.git/info/exclude` so keys are not committed, and `claudeCode.environmentVariables` is removed from user settings."
+          "markdownDescription": "Where **Apply Profile** / **Quick Switch** save the profile's environment variables.\n\n- `workspace` *(default)* — `env` in `.claude/settings.local.json` for this workspace, so each project/window can use a different AI Incubator key. Added to `.git/info/exclude` so keys aren't committed; `claudeCode.environmentVariables` is removed from user settings.\n- `user` — `claudeCode.environmentVariables` in user settings (one profile for all windows)."
         },
         "claudeSwitch.statusRefreshIntervalSeconds": {
           "type": "number",

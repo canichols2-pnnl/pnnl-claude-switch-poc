@@ -1,4 +1,4 @@
-# Contributing to Claude API Switch
+# Contributing to PNNL Claude API Switch
 
 Thanks for your interest in contributing! 🎉
 
@@ -42,7 +42,7 @@ claude_switch/
 
 - Use `Debug: Show Extension State` to inspect internal data
 - Use `Debug: Create Test Profile` to test the storage pipeline without the webview
-- Check **Help → Toggle Developer Tools** for console logs (prefix: `[Claude API Switch]`)
+- Check **Help → Toggle Developer Tools** for console logs (prefix: `[PNNL Claude API Switch]`)
 
 ## PR Guidelines
 
