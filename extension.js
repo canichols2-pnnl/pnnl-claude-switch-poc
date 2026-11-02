@@ -151,28 +151,20 @@ function getStorageTarget() {
   return value === 'workspace' ? 'workspace' : 'user';
 }
 
-/** Workspace folder the current window is "about": the active editor's folder, else the first one. */
-function getContextFolder() {
-  const folders = vscode.workspace.workspaceFolders || [];
-  if (folders.length === 0) return null;
-  const doc = vscode.window.activeTextEditor?.document;
-  if (doc) {
-    const f = vscode.workspace.getWorkspaceFolder(doc.uri);
-    if (f) return f;
-  }
-  return folders[0];
-}
-
-/** Folder to apply a profile to — asks only in multi-root workspaces. */
-async function pickTargetFolder() {
-  const folders = vscode.workspace.workspaceFolders || [];
-  if (folders.length <= 1) return folders[0] || null;
-  return vscode.window.showWorkspaceFolderPick({ placeHolder: 'Apply profile to which workspace folder?' });
+/**
+ * The folder Claude Code runs in — and so reads .claude/settings.local.json from.
+ * The Claude Code extension always starts sessions in the *first* workspace folder
+ * (other folders are only added as extra directories), regardless of the active editor.
+ */
+function getClaudeRootFolder() {
+  return (vscode.workspace.workspaceFolders || [])[0] || null;
 }
 
 function describeTarget(folder) {
   if (getStorageTarget() === 'workspace') {
-    return folder ? `${LOCAL_SETTINGS_DIR}/${LOCAL_SETTINGS_FILE} in "${folder.name}"` : 'workspace (no folder open)';
+    if (!folder) return 'workspace (no folder open)';
+    const multiRoot = (vscode.workspace.workspaceFolders || []).length > 1;
+    return `${LOCAL_SETTINGS_DIR}/${LOCAL_SETTINGS_FILE} in "${folder.name}"${multiRoot ? ' (first workspace folder)' : ''}`;
   }
   return `${getEditorLabel()} user settings`;
 }
@@ -180,7 +172,7 @@ function describeTarget(folder) {
 /** Reads env vars from whichever storage target is selected. */
 async function readCurrentEnvVars(folder) {
   if (getStorageTarget() === 'workspace') {
-    folder = folder || getContextFolder();
+    folder = folder || getClaudeRootFolder();
     return folder ? readLocalEnvVars(folder) : [];
   }
   return readUserEnvVars();
@@ -197,13 +189,9 @@ async function writeEnvVars(context, variables, folder) {
   return writeEnvVarsToUser(variables);
 }
 
-/** Applies a profile to the selected target (prompting for a folder if needed). */
+/** Applies a profile to the selected target. */
 async function applyProfileVariables(context, profile) {
-  let folder = null;
-  if (getStorageTarget() === 'workspace') {
-    folder = await pickTargetFolder();
-    if (!folder && (vscode.workspace.workspaceFolders || []).length > 1) return null; // picker dismissed
-  }
+  const folder = getStorageTarget() === 'workspace' ? getClaudeRootFolder() : null;
   const result = await writeEnvVars(context, profile.variables, folder);
   return { ...result, folder, targetLabel: describeTarget(folder) };
 }
@@ -302,10 +290,26 @@ function removeKeyFromSettingsFile(settingsPath, key) {
   return true;
 }
 
-// ── Workspace settings (<folder>/.claude/settings.local.json → "env") ──
+// ── Workspace settings (.claude/settings.local.json → "env") ──
 
-function localSettingsUri(folder) {
-  return vscode.Uri.joinPath(folder.uri, LOCAL_SETTINGS_DIR, LOCAL_SETTINGS_FILE);
+/**
+ * Where Claude Code keeps .claude/settings.local.json for a session started in `folder`:
+ * - Windows, outside git, or when the repo root is the home dir → `<folder>/.claude/`
+ * - otherwise → `<repo root>/.claude/` (the main checkout's root for a linked worktree)
+ * The Claude process runs where the workspace lives, so a remote window (WSL, SSH,
+ * containers) is treated as Linux even when this UI extension runs on Windows.
+ */
+async function localSettingsUri(folder) {
+  const inFolder = vscode.Uri.joinPath(folder.uri, LOCAL_SETTINGS_DIR, LOCAL_SETTINGS_FILE);
+  const claudeOnWindows = folder.uri.scheme === 'file' && process.platform === 'win32';
+  if (claudeOnWindows) return inFolder;
+
+  const repo = await findGitRepo(folder);
+  if (!repo) return inFolder;
+  if (repo.mainRoot.scheme === 'file' && path.resolve(repo.mainRoot.fsPath) === path.resolve(os.homedir())) {
+    return inFolder;
+  }
+  return vscode.Uri.joinPath(repo.mainRoot, LOCAL_SETTINGS_DIR, LOCAL_SETTINGS_FILE);
 }
 
 function isFileNotFound(err) {
@@ -315,7 +319,7 @@ function isFileNotFound(err) {
 async function readLocalSettings(folder) {
   let raw;
   try {
-    raw = Buffer.from(await vscode.workspace.fs.readFile(localSettingsUri(folder))).toString('utf-8');
+    raw = Buffer.from(await vscode.workspace.fs.readFile(await localSettingsUri(folder))).toString('utf-8');
   } catch (e) {
     if (isFileNotFound(e)) return {};
     throw e;
@@ -336,8 +340,8 @@ function ownedEnvStateKey(folder) {
 }
 
 async function writeEnvVarsToLocal(context, folder, variables) {
-  const uri = localSettingsUri(folder);
   try {
+    const uri = await localSettingsUri(folder);
     const settings = await readLocalSettings(folder);
     const env = settings.env && typeof settings.env === 'object' ? { ...settings.env } : {};
 
@@ -358,7 +362,7 @@ async function writeEnvVarsToLocal(context, folder, variables) {
     if (Object.keys(env).length) settings.env = env;
     else delete settings.env;
 
-    await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(folder.uri, LOCAL_SETTINGS_DIR));
+    await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
     await vscode.workspace.fs.writeFile(uri, Buffer.from(JSON.stringify(settings, null, 2) + '\n', 'utf-8'));
     await context.workspaceState.update(ownedEnvStateKey(folder), written);
 
@@ -382,36 +386,49 @@ async function readText(uri) {
 }
 
 /**
+ * Finds the git repository containing `folder` by walking up to the nearest `.git`,
+ * following worktree "gitdir:" / "commondir" pointers.
+ * @returns {Promise<{root:any, commonDir:any, mainRoot:any} | null>} root = this checkout,
+ *   commonDir = the shared .git directory, mainRoot = the main checkout's root
+ */
+async function findGitRepo(folder) {
+  let dir = folder.uri, gitDir = null;
+  for (let i = 0; i < 20 && !gitDir; i++) {
+    const dotGit = vscode.Uri.joinPath(dir, '.git');
+    try {
+      const stat = await vscode.workspace.fs.stat(dotGit);
+      if (stat.type & vscode.FileType.Directory) {
+        gitDir = dotGit;
+      } else {
+        const m = (await readText(dotGit)).match(/^gitdir:\s*(.+)$/m);
+        if (m) gitDir = resolveGitPath(dir, m[1]);
+      }
+    } catch (_) { /* not here — keep walking up */ }
+    if (gitDir) break;
+    const parent = vscode.Uri.joinPath(dir, '..');
+    if (parent.path === dir.path) break;
+    dir = parent;
+  }
+  if (!gitDir) return null;
+
+  let commonDir = gitDir;
+  try { commonDir = resolveGitPath(gitDir, (await readText(vscode.Uri.joinPath(gitDir, 'commondir'))).trim()); }
+  catch (_) { /* not a linked worktree */ }
+  const mainRoot = path.posix.basename(commonDir.path) === '.git' ? vscode.Uri.joinPath(commonDir, '..') : dir;
+  return { root: dir, commonDir, mainRoot };
+}
+
+/**
  * Makes sure .claude/settings.local.json is ignored by adding it to the repo's
- * .git/info/exclude (local-only, so no tracked file is touched). Walks up from the
- * folder to find the repo and follows worktree "gitdir:" / "commondir" pointers.
+ * .git/info/exclude (local-only, so no tracked file is touched).
  * Returns true if excluded (or no repo found), false if it could not be done.
  */
 async function ensureGitExcluded(folder) {
   try {
-    let dir = folder.uri, gitDir = null;
-    for (let i = 0; i < 20 && !gitDir; i++) {
-      const dotGit = vscode.Uri.joinPath(dir, '.git');
-      try {
-        const stat = await vscode.workspace.fs.stat(dotGit);
-        if (stat.type & vscode.FileType.Directory) {
-          gitDir = dotGit;
-        } else {
-          const m = (await readText(dotGit)).match(/^gitdir:\s*(.+)$/m);
-          if (m) gitDir = resolveGitPath(dir, m[1]);
-        }
-      } catch (_) { /* not here — keep walking up */ }
-      if (gitDir) break;
-      const parent = vscode.Uri.joinPath(dir, '..');
-      if (parent.path === dir.path) break;
-      dir = parent;
-    }
-    if (!gitDir) return true; // not a git repo — nothing can be committed
+    const repo = await findGitRepo(folder);
+    if (!repo) return true; // not a git repo — nothing can be committed
 
-    try { gitDir = resolveGitPath(gitDir, (await readText(vscode.Uri.joinPath(gitDir, 'commondir'))).trim()); }
-    catch (_) { /* not a linked worktree */ }
-
-    const infoDir = vscode.Uri.joinPath(gitDir, 'info');
+    const infoDir = vscode.Uri.joinPath(repo.commonDir, 'info');
     const excludeUri = vscode.Uri.joinPath(infoDir, 'exclude');
     let content = '';
     try { content = await readText(excludeUri); } catch (e) { if (!isFileNotFound(e)) throw e; }
@@ -602,10 +619,13 @@ function diffVars(want, have) {
  */
 async function detectActiveProfile(context) {
   const target = getStorageTarget();
-  const folder = target === 'workspace' ? getContextFolder() : null;
+  const folder = target === 'workspace' ? getClaudeRootFolder() : null;
   const base = { target, folder, checkedAt: new Date() };
   if (target === 'workspace') base.userVarsPresent = readUserEnvVars().length > 0;
   if (target === 'workspace' && !folder) return { ...base, state: 'no-folder' };
+  if (target === 'workspace') {
+    try { base.localUri = await localSettingsUri(folder); } catch (_) { /* reported by the read below */ }
+  }
 
   let current;
   try { current = normalizeVars(await readCurrentEnvVars(folder)); }
@@ -1473,7 +1493,7 @@ async function cmdApplyProfile(context, profilesProvider, profileItem) {
 
   const detail = getStorageTarget() === 'workspace'
     ? `This will write ${profile.variables.length} variables to the "env" block of ` +
-      `${LOCAL_SETTINGS_DIR}/${LOCAL_SETTINGS_FILE} in this workspace, and remove ` +
+      `${describeTarget(getClaudeRootFolder())}, and remove ` +
       `\`claudeCode.environmentVariables\` from user settings.`
     : `This will update \`claudeCode.environmentVariables\` in ${getEditorLabel()} user settings ` +
       `with ${profile.variables.length} variables (affects every window).`;
@@ -1484,7 +1504,6 @@ async function cmdApplyProfile(context, profilesProvider, profileItem) {
   if (confirm !== 'Apply') return;
 
   const result = await applyProfileVariables(context, profile);
-  if (!result) return;
   if (result.success) {
     await recordUsage(context, profile.id);
     profilesProvider.refresh();
@@ -1625,9 +1644,9 @@ async function cmdImportAll(context, profilesProvider) {
 async function cmdImportFromCurrent(context, profilesProvider) {
   let vars;
   try { vars = await readCurrentEnvVars(); }
-  catch (e) { vscode.window.showErrorMessage(`Could not read ${describeTarget(getContextFolder())}: ${e.message}`); return; }
+  catch (e) { vscode.window.showErrorMessage(`Could not read ${describeTarget(getClaudeRootFolder())}: ${e.message}`); return; }
   if (!Array.isArray(vars) || vars.length === 0) {
-    vscode.window.showErrorMessage(`No environment variables found in ${describeTarget(getContextFolder())}.`);
+    vscode.window.showErrorMessage(`No environment variables found in ${describeTarget(getClaudeRootFolder())}.`);
     return;
   }
   const name = await vscode.window.showInputBox({
@@ -1758,7 +1777,7 @@ async function cmdQuickSwitch(context, profilesProvider) {
   );
 
   const selected = await vscode.window.showQuickPick(items, {
-    placeHolder: `Select a profile to apply to ${describeTarget(getContextFolder())}...`,
+    placeHolder: `Select a profile to apply to ${describeTarget(getClaudeRootFolder())}...`,
     matchOnDescription: true,
     matchOnDetail: true,
   });
@@ -1769,7 +1788,6 @@ async function cmdQuickSwitch(context, profilesProvider) {
   }
 
   const result = await applyProfileVariables(context, selected.profile);
-  if (!result) return;
   if (result.success) {
     await recordUsage(context, selected.profile.id);
     profilesProvider.refresh();
@@ -1813,11 +1831,11 @@ async function cmdClearUsageStats(context, profilesProvider) {
 
 // ── View Current Config ──
 async function cmdViewCurrentConfig() {
-  const folder = getContextFolder();
+  const folder = getClaudeRootFolder();
   const label = describeTarget(folder);
   const isLocal = getStorageTarget() === 'workspace';
   const settingsUri = isLocal
-    ? (folder ? localSettingsUri(folder) : null)
+    ? (folder ? await localSettingsUri(folder) : null)
     : vscode.Uri.file(detectSettingsJsonPath());
 
   let vars;
@@ -1866,7 +1884,7 @@ async function cmdDebugShowState(context) {
     const profiles = loadProfiles(context);
     const editorLabel = getEditorLabel();
     const settingsPath = detectSettingsJsonPath();
-    const folder = getContextFolder();
+    const folder = getClaudeRootFolder();
     const detected = _monitor ? await _monitor.check() : await detectActiveProfile(context);
     let currentVars = [];
     try { currentVars = await readCurrentEnvVars(folder); } catch (_) { /* reported via detected.error */ }
@@ -1875,7 +1893,7 @@ async function cmdDebugShowState(context) {
       `Editor: ${editorLabel}`, `User settings path: ${settingsPath}`,
       `User settings exists: ${fs.existsSync(settingsPath)}`,
       `Storage target: ${getStorageTarget()} → ${describeTarget(folder)}`,
-      ...(getStorageTarget() === 'workspace' && folder ? [`Local settings file: ${localSettingsUri(folder).fsPath}`] : []),
+      ...(getStorageTarget() === 'workspace' && folder ? [`Local settings file: ${(await localSettingsUri(folder)).fsPath}`] : []),
       `Profiles stored: ${profiles.length}`,
       `Secrets cached: ${_secretCache.size}`,
       `Detected state: ${detected.state}${detected.profile ? ` (${detected.profile.name}, id=${detected.profile.id})` : ''}`,
@@ -1954,7 +1972,6 @@ async function onStorageTargetChanged(context, profilesProvider) {
   if (!pick || pick !== applyHere) return;
 
   const result = await applyProfileVariables(context, matched);
-  if (!result) return;
   if (result.success) {
     await recordUsage(context, matched.id);
     profilesProvider.refresh();
@@ -2000,9 +2017,13 @@ function renderStatusBar(item, result) {
       lines.push(`No profile applied in ${where}.`);
   }
 
+  if (result.target === 'workspace' && (vscode.workspace.workspaceFolders || []).length > 1) {
+    lines.push('Claude Code runs in the first workspace folder, so that is where the profile is saved. Reorder the folders to change it.');
+  }
   if (result.userVarsPresent) {
     lines.push('$(warning) `claudeCode.environmentVariables` is set in user settings again — apply a profile to remove it.');
   }
+  if (result.localUri) lines.push(`File: \`${result.localUri.fsPath}\``);
   const checked = result.checkedAt ? result.checkedAt.toLocaleTimeString() : '—';
   lines.push(
     '---',
@@ -2075,12 +2096,25 @@ function activate(context) {
 
   context.subscriptions.push(_monitor.onDidCheck(({ result, changed }) => {
     renderStatusBar(statusBarItem, result);
+    watchLocalFile(result.localUri);
     if (changed) profilesProvider.redraw();
   }));
 
   // ── Re-verify whenever the source of truth may have changed ──
   const check = () => _monitor.check();
-  const watcher = vscode.workspace.createFileSystemWatcher(`**/${LOCAL_SETTINGS_DIR}/${LOCAL_SETTINGS_FILE}`);
+  // Watch the exact file Claude reads — it can be outside the workspace (the repo root on macOS/Linux)
+  let watcher = null, watchedPath = null;
+  function watchLocalFile(uri) {
+    const key = uri ? uri.toString() : null;
+    if (key === watchedPath) return;
+    watcher?.dispose();
+    watcher = null;
+    watchedPath = key;
+    if (!uri) return;
+    watcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(vscode.Uri.joinPath(uri, '..'), LOCAL_SETTINGS_FILE));
+    watcher.onDidCreate(check); watcher.onDidChange(check); watcher.onDidDelete(check);
+  }
 
   let pollTimer = null;
   function restartPolling() {
@@ -2090,8 +2124,7 @@ function activate(context) {
   }
 
   context.subscriptions.push(
-    watcher,
-    watcher.onDidCreate(check), watcher.onDidChange(check), watcher.onDidDelete(check),
+    { dispose: () => watcher?.dispose() },
     vscode.workspace.onDidChangeConfiguration(e => {
       if (e.affectsConfiguration(`${EXT_NAMESPACE}.${SETTING_STORAGE_TARGET}`)) {
         onStorageTargetChanged(context, profilesProvider);
@@ -2100,11 +2133,8 @@ function activate(context) {
       }
       if (e.affectsConfiguration(`${EXT_NAMESPACE}.${SETTING_REFRESH_SECONDS}`)) restartPolling();
     }),
+    // Adding, removing or reordering folders can change which one is first (= Claude's root)
     vscode.workspace.onDidChangeWorkspaceFolders(check),
-    // Multi-root: the "current" folder follows the active editor
-    vscode.window.onDidChangeActiveTextEditor(() => {
-      if ((vscode.workspace.workspaceFolders || []).length > 1 && getStorageTarget() === 'workspace') check();
-    }),
     // Coming back to this window: pick up profile/secret edits made in another window
     vscode.window.onDidChangeWindowState(async (state) => {
       if (!state.focused) return;
